@@ -1,0 +1,485 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Data::Dumper;
+
+#############################################################################
+# filtering_r.pl  —  clinical candidate filtering for trio/duo germline VCFs
+#                    (robust successor of filtering_new.pl / filtering_b3.pl)
+#
+# Pipeline features
+# -----------------
+#  * CSQ fields resolved BY NAME from each VCF's own CSQ header (no hard-coded
+#    indices). Critical fields are asserted at startup (loud failure, never
+#    silent).                                                          [#3]
+#  * Reads *.germline.vep.vcf.gz directly; auto-discovers families by filename:
+#    <base>=proband, <base>M=mother, <base>F=father.
+#  * Multiallelic input is assumed pre-split (vep_annotate.sh runs
+#    `bcftools norm -m-any`). Any residual multiallelic row is skipped+counted.
+#                                                                      [#2]
+#  * Structural gates (AND): MANE transcript + whitelisted consequence
+#    (matched per-&-atom) + panel gene + rare. Consequence is split on '&' so
+#    unanticipated compound terms are not silently dropped.            [#1]
+#  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
+#    gnomAD AF than dominant genes.                                    [#6]
+#  * Inclusion (rescue) gate (OR): CADD>=22, AlphaMissense path, EVE path,
+#    REVEL>=0.5, Pangolin>=0.5, ClinVar P/LP. Each surviving row records
+#    which arm(s) fired in a `kept_by` column.                    [#4,#8]
+#  * Genotype-aware: proband zygosity / DP / GQ / allele-balance columns from
+#    FORMAT; parent inheritance uses parental GT (carrier = non-ref), not mere
+#    site presence.                                                [#5,#10]
+#  * Per-gene recessive logic: homozygous and compound-het (trans where
+#    phaseable) flags.                                                 [#6]
+#  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
+#    columns.                                                      [#4,#7]
+#  * Run summary printed per proband.                                  [#9]
+#
+# Splicing (Pangolin) two-pass bridge
+# -----------------------------------
+#  If <proband>.pangolin.tsv is ABSENT, the script writes
+#  <proband>.pangolin_input.csv (the structural-pass candidates) and stops for
+#  that proband. Run Pangolin (run_filtering.sh) to create the .tsv, then
+#  re-run to produce <proband>.germline.candidatos.
+#############################################################################
+
+# ── Tunable thresholds (single source of truth) ──
+my $INPUT_GLOB = '*.germline.vep.vcf.gz';
+my $FREQ_AD    = 0.01;   # max gnomAD AF (%) for dominant genes  (1 in 10,000)
+my $FREQ_AR    = 1.0;    # max gnomAD AF (%) for recessive genes (carrier freq)
+my $CADD_MIN   = 22;     # CADD PHRED rescue threshold
+my $REVEL_MIN  = 0.5;    # REVEL rescue threshold (permissive; ClinGen PP3 ~0.644)
+my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
+
+#############################################################################
+# Reference hashes
+#############################################################################
+
+open MANE, "<mane-plus-clinical-names.txt" or die "mane: $!";
+my %mane;
+while (my $m = <MANE>) { chomp $m; my ($a,$b) = split /\t/, $m; $mane{$a} = $b; }
+close MANE;
+print "hash mane, listo!\n";
+
+# G4E panel: gene -> "Association \t MOI \t GDV"
+open G4E, "<g4e-2025.txt" or die "g4e: $!";
+my %epigenes;
+while (my $g = <G4E>) {
+    chomp $g;
+    my ($a,$b,$c,$d) = split /\t/, $g;
+    $epigenes{$a} = join("\t", $b//"", $c//"", $d//"");
+}
+close G4E;
+print "hash G4E, listo!\n";
+
+# Consequence whitelist (atomic terms recommended; compound entries harmless).
+open VAR, "<typevar.txt" or die "typevar: $!";
+my %varfilter;
+while (my $t = <VAR>) { chomp $t; my ($c,$d) = split /\t/, $t; $varfilter{$c} = $d//""; }
+close VAR;
+print "hash var, listo!\n";
+
+#############################################################################
+# Helpers
+#############################################################################
+
+sub open_vcf {
+    my ($file) = @_;
+    my $fh;
+    if ($file =~ /\.gz$/) { open($fh,"-|","gzip","-dc",$file) or die "gzip $file: $!"; }
+    else                  { open($fh,"<",$file)              or die "$file: $!"; }
+    return $fh;
+}
+
+# CSQ field name -> column index, from the ##INFO=<ID=CSQ ... Format: ...> header.
+sub csq_columns {
+    my ($file) = @_;
+    my $fh = open_vcf($file);
+    my %col;
+    while (my $line = <$fh>) {
+        last if $line =~ /^#CHROM/;
+        next unless $line =~ /ID=CSQ/;
+        if ($line =~ /Format:\s*([^"]+)"/) {
+            my @n = split /\|/, $1;
+            $col{$n[$_]} = $_ for 0 .. $#n;
+        }
+        last if %col;
+    }
+    close $fh;
+    return \%col;
+}
+
+# Resolve a logical field to a CSQ index: exact name(s) first, then regex.
+sub resolve {
+    my ($col, @cand) = @_;
+    for my $name (@cand) { return $col->{$name} if exists $col->{$name}; }
+    for my $pat (@cand) {
+        for my $name (keys %$col) { return $col->{$name} if $name =~ /$pat/i; }
+    }
+    return undef;
+}
+
+sub field {
+    my ($row,$i) = @_;
+    return "" unless defined $i;
+    my $v = $row->[$i];
+    return defined($v) ? $v : "";
+}
+
+# Parse one sample's FORMAT:SAMPLE -> (GT, DP, GQ, AD_ref, AD_alt).
+sub parse_call {
+    my ($fmt,$smp) = @_;
+    return ("","","","","") unless defined $fmt && defined $smp;
+    my @k = split /:/, $fmt;
+    my @v = split /:/, $smp;
+    my %h; @h{@k} = @v;
+    my $gt = defined $h{GT} ? $h{GT} : "";
+    my $dp = defined $h{DP} ? $h{DP} : "";
+    my $gq = defined $h{GQ} ? $h{GQ} : "";
+    my ($ar,$aa) = ("","");
+    if (defined $h{AD} && $h{AD} ne "" && $h{AD} ne ".") {
+        my @ad = split /,/, $h{AD};
+        ($ar,$aa) = ($ad[0]//"", $ad[1]//"");
+    }
+    return ($gt,$dp,$gq,$ar,$aa);
+}
+
+# Zygosity from a GT string: hom (alt/alt), het (ref/alt), ref, or "" (no-call).
+sub zygosity {
+    my ($gt) = @_;
+    return "" unless defined $gt && $gt ne "";
+    my @a = split /[\/|]/, $gt;
+    return "" unless @a >= 2 && $a[0] ne "." && $a[1] ne ".";
+    my $n1 = grep { $_ eq "1" } @a;
+    return $n1 >= 2 ? "hom" : $n1 == 1 ? "het" : "ref";
+}
+
+# Parent carrier map: chr-pos-ref-alt -> 1 if the parent carries the ALT
+# (GT contains a '1'); records with 0/0 or no-call are NOT carriers.
+sub load_parent {
+    my ($file) = @_;
+    my %carry;
+    return \%carry unless defined $file && -e $file;
+    my $fh = open_vcf($file);
+    while (my $line = <$fh>) {
+        next if $line =~ /^#/;
+        chomp $line;
+        my @c = split /\t/, $line;
+        my ($chr,$pos,$ref,$alt,$fmt,$smp) = @c[0,1,3,4,8,9];
+        next if $alt =~ /,/;                       # should be pre-split
+        my ($gt) = parse_call($fmt,$smp);
+        my $z = zygosity($gt);
+        $carry{"$chr-$pos-$ref-$alt"} = 1 if $z eq "het" || $z eq "hom";
+    }
+    close $fh;
+    return \%carry;
+}
+
+# Pangolin score map: "chr-pos-ref-alt <tab> score".
+sub load_scores {
+    my ($file) = @_;
+    my %s;
+    open(my $fh,"<",$file) or die "$file: $!";
+    while (my $l = <$fh>) { chomp $l; my ($id,$v) = split /\t/, $l; $s{$id} = $v if defined $v; }
+    close $fh;
+    return \%s;
+}
+
+# Is a consequence whitelisted? Pass if ANY '&'-separated atom is in the list.
+sub consequence_ok {
+    my ($csq) = @_;
+    for my $atom (split /&/, $csq) { return 1 if exists $varfilter{$atom}; }
+    return 0;
+}
+
+# ClinVar classification helpers (on a CLNSIG-style string).
+sub clinvar_pathogenic {
+    my ($s) = @_;
+    return 0 unless defined $s && $s ne "";
+    return 0 if $s =~ /conflicting/i;
+    return 0 if $s =~ /benign/i;
+    return ($s =~ /pathogenic/i) ? 1 : 0;
+}
+sub clinvar_benign {
+    my ($s) = @_;
+    return 0 unless defined $s && $s ne "";
+    return ($s =~ /benign/i && $s !~ /pathogenic/i) ? 1 : 0;
+}
+
+#############################################################################
+# Discover trios / duos from filenames
+#############################################################################
+
+my @files = glob $INPUT_GLOB;
+my %file_for;
+for my $f (@files) { (my $s = $f) =~ s/\.germline\.vep\.vcf\.gz$//; $file_for{$s} = $f; }
+
+my %is_parent;
+for my $s (keys %file_for) {
+    $is_parent{$s} = 1 if $s =~ /^(.+)([MF])$/ && exists $file_for{$1};
+}
+my @probands = sort grep { !$is_parent{$_} } keys %file_for;
+
+print "muestras encontradas: ", join(", ", sort keys %file_for), "\n";
+print "probandos: ", join(", ", @probands), "\n";
+
+# Output column order (single definition, reused for header + rows).
+my @COLS = qw(
+    chr start end ref alt gene strand transcript consequence hgvs.c hgvs.p tpos
+    revel eve_class eve_score cadd am_class am_score pangolin_score
+    clinvar_sig clinvar_stars clinvar_disease
+    loftee loftee_filter loftee_flags
+    gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
+    zygosity GT DP GQ AB
+    inheritance recessive_flag kept_by Association MOI GDV
+);
+
+#############################################################################
+# Process each proband
+#############################################################################
+
+foreach my $proband (@probands) {
+    my $pfile = $file_for{$proband};
+    my $mfile = $file_for{$proband."M"};
+    my $ffile = $file_for{$proband."F"};
+    my $have_m = defined $mfile;
+    my $have_f = defined $ffile;
+
+    my $tsv   = "$proband.pangolin.tsv";
+    my $final = -e $tsv;
+    my $pscore = $final ? load_scores($tsv) : {};
+
+    my $kind = ($have_m && $have_f) ? "trio" : ($have_m||$have_f) ? "duo" : "singleton";
+    print "\ntrabajando con $proband ($kind, ",
+          ($final ? "FINAL: scores from $tsv" : "EMIT: no scores yet"), ")";
+    print " | madre: $mfile" if $have_m;
+    print " | padre: $ffile" if $have_f;
+    print "\n";
+
+    # Resolve CSQ indices for this proband's layout.
+    my $col = csq_columns($pfile);
+    my %i = (
+        gene          => resolve($col,'SYMBOL'),
+        strand        => resolve($col,'STRAND'),
+        transcript    => resolve($col,'Feature'),
+        consequence   => resolve($col,'Consequence'),
+        hgvsc         => resolve($col,'HGVSc'),
+        hgvsp         => resolve($col,'HGVSp'),
+        tpos          => resolve($col,'cDNA_position'),
+        revel         => resolve($col,'REVEL'),
+        eve_class     => resolve($col,'EVE_CLASS'),
+        eve_score     => resolve($col,'EVE_SCORE'),
+        cadd          => resolve($col,'CADD_PHRED'),
+        am_class      => resolve($col,'am_class'),
+        am_score      => resolve($col,'am_pathogenicity'),
+        loftee        => resolve($col,'LoF'),
+        loftee_filter => resolve($col,'LoF_filter'),
+        loftee_flags  => resolve($col,'LoF_flags'),
+        g_ac          => resolve($col,'gnomADmin_AC_joint','gnomad.*AC'),
+        g_an          => resolve($col,'gnomADmin_AN_joint','gnomad.*AN'),
+        g_nhom        => resolve($col,'gnomADmin_nhomalt_joint','gnomad.*nhomalt'),
+        g_filter      => resolve($col,'gnomADmin_FILTER','gnomad.*FILTER'),
+        # Fresh ClinVar (--custom) preferred; fall back to cache CLIN_SIG.
+        clnsig        => resolve($col,'ClinVar_CLNSIG','CLIN_SIG'),
+        clnstars      => resolve($col,'ClinVar_CLNREVSTAT'),
+        clndn         => resolve($col,'ClinVar_CLNDN'),
+    );
+
+    # [#3] Assert critical fields resolved — fail loudly, never silently pass-all.
+    my @critical = qw(gene transcript consequence cadd g_ac g_an);
+    my @missing = grep { !defined $i{$_} } @critical;
+    die "FATAL: CSQ fields not found in $pfile: @missing\n".
+        "  The annotation layout changed; check the CSQ header.\n" if @missing;
+    warn "WARN: ClinVar field not found in $pfile (ClinVar rescue/columns disabled)\n"
+        unless defined $i{clnsig};
+
+    my ($mama,$papa) = ({},{});
+    if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
+
+    # Run statistics [#9].
+    my %stat = (lines=>0, multiallelic=>0, structural=>0, rare=>0, candidates=>0);
+    my (%by_arm, %by_inh, %by_flag);
+
+    my %emit;            # EMIT pass: unique candidate variants
+    my @rows;            # FINAL pass: buffered rows (for per-gene recessive logic)
+
+    my $pfh = open_vcf($pfile);
+    while (my $v = <$pfh>) {
+        chomp $v;
+        next if $v =~ /^#/;
+        $stat{lines}++;
+
+        my @c = split /\t/, $v;
+        my ($chr,$start,$ref,$alt,$info,$fmt,$smp) = @c[0,1,3,4,7,8,9];
+
+        if ($alt =~ /,/) { $stat{multiallelic}++; next; }   # [#2] should be pre-split
+
+        my ($csq) = $info =~ /(?:^|;)CSQ=([^;]*)/;
+        next unless defined $csq;
+
+        my $my_id = "$chr-$start-$ref-$alt";
+
+        # Proband genotype (same for all transcripts of this variant) [#5].
+        my ($gt,$dp,$gq,$adr,$ada) = parse_call($fmt,$smp);
+        my $zyg = zygosity($gt);
+        my $ab  = ($ada ne "" && ($adr+$ada) > 0) ? sprintf("%.2f", $ada/($adr+$ada)) : "";
+
+        foreach my $fila (split /,/, $csq) {
+            my @r = split /\|/, $fila, -1;
+            my $gene        = field(\@r,$i{gene});
+            my $transcript  = field(\@r,$i{transcript});
+            my $consequence = field(\@r,$i{consequence});
+
+            # ── Structural gates (AND) ──
+            next unless exists $mane{$transcript};
+            next unless consequence_ok($consequence);          # [#1] per-atom
+            next unless exists $epigenes{$gene};
+
+            my ($assoc,$moi,$gdv) = split /\t/, $epigenes{$gene};
+            $moi //= "";
+
+            my $g_ac = field(\@r,$i{g_ac}); $g_ac = ($g_ac eq "") ? 0 : $g_ac;
+            my $g_an = field(\@r,$i{g_an}); $g_an = ($g_an eq "") ? 0 : $g_an;
+            my $freq = ($g_an > 0) ? ($g_ac/$g_an)*100 : 0;
+
+            # [#6] MOI-aware rarity: recessive genes tolerate higher carrier freq.
+            my $recessive = ($moi =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0;
+            my $freqmax   = $recessive ? $FREQ_AR : $FREQ_AD;
+            next unless $freq <= $freqmax;
+
+            $stat{structural}++;
+            $stat{rare}++;
+
+            # ── EMIT pass: collect candidate positions for Pangolin ──
+            if (!$final) {
+                $emit{$my_id} = "$chr,$start,$ref,$alt" unless exists $emit{$my_id};
+                next;
+            }
+
+            # ── FINAL pass ──
+            my $revel     = field(\@r,$i{revel});
+            my $eve_class = field(\@r,$i{eve_class});
+            my $eve_score = field(\@r,$i{eve_score});
+            my $cadd      = field(\@r,$i{cadd});
+            my $am_class  = field(\@r,$i{am_class});
+            my $am_score  = field(\@r,$i{am_score});
+            my $loftee    = field(\@r,$i{loftee});
+            my $lof_filt  = field(\@r,$i{loftee_filter});
+            my $lof_flag  = field(\@r,$i{loftee_flags});
+            my $g_nhom    = field(\@r,$i{g_nhom});
+            my $g_filter  = field(\@r,$i{g_filter});
+            my $clnsig    = field(\@r,$i{clnsig});
+            my $clnstars  = field(\@r,$i{clnstars});
+            my $clndn     = field(\@r,$i{clndn});
+            my $strand    = field(\@r,$i{strand});
+            my $hgvsc     = field(\@r,$i{hgvsc});
+            my $hgvsp     = field(\@r,$i{hgvsp});
+            my $tpos      = field(\@r,$i{tpos});
+            my $pangolin  = exists $pscore->{$my_id} ? $pscore->{$my_id} : "";
+
+            # ── Inclusion gate (OR) + record which arm(s) fired [#4,#8] ──
+            my @kept;
+            my $cadd_num = ($cadd eq "") ? 0 : $cadd;
+            push @kept, "CADD"     if $cadd_num >= $CADD_MIN;
+            push @kept, "AM"       if $am_class  =~ /athogenic/;
+            push @kept, "EVE"      if $eve_class =~ /athogenic/;
+            push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
+            push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
+            push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
+            next unless @kept;
+            my $kept_by = join(";", @kept);
+
+            # ── Inheritance from parental GT (carrier = non-ref) [#10] ──
+            my $in_m = exists $mama->{$my_id};
+            my $in_f = exists $papa->{$my_id};
+            my $inheritance;
+            if ($have_m && $have_f) {
+                $inheritance = ($in_m && $in_f) ? "IB" : $in_m ? "IM" : $in_f ? "IF" : "DN";
+            } elsif ($have_m) {
+                $inheritance = $in_m ? "IM" : "DN/IF";
+            } elsif ($have_f) {
+                $inheritance = $in_f ? "IF" : "DN/IM";
+            } else {
+                $inheritance = "NA";
+            }
+
+            $stat{candidates}++;
+            $by_arm{$_}++ for @kept;
+            $by_inh{$inheritance}++;
+
+            push @rows, {
+                vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
+                data=>{
+                    chr=>$chr, start=>$start, end=>$start, ref=>$ref, alt=>$alt,
+                    gene=>$gene, strand=>$strand, transcript=>$transcript,
+                    consequence=>$consequence, 'hgvs.c'=>$hgvsc, 'hgvs.p'=>$hgvsp, tpos=>$tpos,
+                    revel=>$revel, eve_class=>$eve_class, eve_score=>$eve_score, cadd=>$cadd,
+                    am_class=>$am_class, am_score=>$am_score, pangolin_score=>$pangolin,
+                    clinvar_sig=>$clnsig, clinvar_stars=>$clnstars, clinvar_disease=>$clndn,
+                    loftee=>$loftee, loftee_filter=>$lof_filt, loftee_flags=>$lof_flag,
+                    gnomAD_ac=>$g_ac, gnomAD_an=>$g_an, gnomAD_af=>sprintf("%.5f",$freq),
+                    gnomAD_nhomalt=>$g_nhom, gnomAD_filter=>$g_filter,
+                    zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
+                    inheritance=>$inheritance, recessive_flag=>"", kept_by=>$kept_by,
+                    Association=>($assoc//""), MOI=>$moi, GDV=>($gdv//""),
+                },
+            };
+        }
+    }
+    close $pfh;
+
+    # ── EMIT pass output ──
+    if (!$final) {
+        my $csv = "$proband.pangolin_input.csv";
+        open my $cfh, ">", $csv or die "$csv: $!";
+        print $cfh "CHROM,POS,REF,ALT\n";
+        print $cfh "$emit{$_}\n" for sort keys %emit;
+        close $cfh;
+        printf "  EMIT: %d structural-pass variants -> %s\n", scalar(keys %emit), $csv;
+        printf "  Run Pangolin on it (run_filtering.sh) to create %s, then re-run.\n", $tsv;
+        next;
+    }
+
+    # ── [#6] Per-gene recessive logic over unique variants ──
+    my %gene_var;   # gene -> vid -> {zyg, mat, pat}
+    for my $row (@rows) {
+        $gene_var{$row->{gene}}{$row->{vid}} = { zyg=>$row->{zyg}, mat=>$row->{mat}, pat=>$row->{pat} };
+    }
+    my %gene_flag;
+    for my $g (keys %gene_var) {
+        my @vids = keys %{$gene_var{$g}};
+        my $hom  = grep { $gene_var{$g}{$_}{zyg} eq "hom" } @vids;
+        my @het  = grep { $gene_var{$g}{$_}{zyg} eq "het" } @vids;
+        my $flag = "";
+        if ($hom) {
+            $flag = "HOM";                                  # homozygous → recessive
+        } elsif (@het >= 2) {
+            my $mat = grep {  $gene_var{$g}{$_}{mat} && !$gene_var{$g}{$_}{pat} } @het;
+            my $pat = grep { !$gene_var{$g}{$_}{mat} &&  $gene_var{$g}{$_}{pat} } @het;
+            $flag = ($mat && $pat) ? "CompHet(trans)" : "CompHet?";  # phaseable only in trio
+        }
+        $gene_flag{$g} = $flag;
+    }
+    for my $row (@rows) {
+        my $f = ($row->{zyg} eq "hom") ? "HOM" : ($gene_flag{$row->{gene}} || "");
+        $row->{data}{recessive_flag} = $f;
+        $by_flag{$f}++ if $f ne "";
+    }
+
+    # ── Write candidatos ──
+    open OUT, ">$proband.germline.candidatos" or die "out: $!";
+    print OUT join("\t", @COLS), "\n";
+    for my $row (@rows) {
+        print OUT join("\t", map { $row->{data}{$_} // "" } @COLS), "\n";
+    }
+    close OUT;
+
+    # ── [#9] Run summary ──
+    print  "  -> $proband.germline.candidatos\n";
+    printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass(rows) | %d candidate-rows\n",
+           $stat{lines}, $stat{multiallelic}, $stat{structural}, $stat{candidates};
+    print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
+    print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
+    print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
+}
+
+print "\nlisto!\n";

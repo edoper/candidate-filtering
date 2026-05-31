@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────
+# ALLOW-LIST .gitignore
+#
+# This directory holds PATIENT genomic data (PHI). To make it impossible to
+# commit patient data by accident, we ignore EVERYTHING by default and then
+# explicitly un-ignore only pipeline code + non-patient reference config.
+#
+# Never remove the leading "*" rule. To track a new code/config file, add an
+# explicit "!<file>" exception below.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Ignore everything by default
+*
+
+# Pipeline code
+!.gitignore
+!README.md
+!LICENSE
+!filtering_r.pl
+!parse_pangolin.pl
+!run_filtering.sh
+!vep_annotate.sh
+
+# Non-patient reference / config
+!g4e-2025.txt
+!typevar.txt
+!mane-plus-clinical-names.txt
+
+# Explicitly DO NOT track (already covered by "*", listed here as documentation
+# of what must never be committed):
+#   *.vcf  *.vcf.gz  *.vcf.gz.tbi  *.tbi  *.bam  *.cram   <- patient sequence data
+#   *.candidatos                                          <- patient results
+#   *.pangolin.csv  *.pangolin.tsv  *.pangolin_input.csv  <- patient-derived
+#   *_summary.html  *.log  vep.*                          <- run artifacts
