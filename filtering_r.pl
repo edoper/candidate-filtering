@@ -325,6 +325,10 @@ sub acmg_classify {
     push @P, "PVS1" if $v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC");
     push @P, "PM4"  if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
     push @P, "PM2"  if $v{freq} <= $PM2_FREQ;
+    # PM6 = ASSUMED de novo (parentage not molecularly confirmed). Only a strict
+    # trio DN (absent in BOTH tested parents) qualifies; duo DN/IF and DN/IM are
+    # ambiguous. Upgrades to PS2 only after confirmed de novo + parentage.
+    push @P, "PM6"  if $v{de_novo};
     my $ncomp = 0;
     $ncomp++ if $v{am_score} ne "" && $v{am_score} >= $SF_AM;
     $ncomp++ if $v{cadd_num} >= $SF_CADD;
@@ -638,7 +642,8 @@ foreach my $proband (@probands) {
             my ($acmg_class,$acmg_crit) = acmg_classify(
                 consequence=>$consequence, lof_type=>$lof_type, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
-                eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin);
+                eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
+                de_novo=>($inheritance eq "DN"));   # PM6: strict trio DN only [#6]
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
