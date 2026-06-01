@@ -125,7 +125,23 @@ A per-proband **run summary** prints counts (read / multiallelic-skipped / struc
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
 clinvar_sig, clinvar_stars, clinvar_disease, loftee, loftee_filter, loftee_flags,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
-zygosity, GT, DP, GQ, AB, inheritance, recessive_flag, kept_by, Association, MOI, GDV`
+zygosity, GT, DP, GQ, AB, inheritance, recessive_flag, kept_by,
+acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
+
+### Automated ACMG/AMP classification & QC flags
+
+- **`acmg_class` / `acmg_criteria`** — an InterVar-style **triage** classification per variant
+  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting) from the criteria
+  derivable here — PVS1 (LoF), PM2/PM4, PP3 (≥2 strong predictors), PP5 (ClinVar P/LP), and
+  BA1/BS1/BS2/BP4/BP6/BP7 — combined per the ACMG 2015 rules. **Not a final clinical call**: PS/PM1/
+  PM5/PP2 aren't assessed, PVS1 doesn't verify gene mechanism/NMD, PM2 is treated as moderate.
+- **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
+  `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
+  `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`.
+- **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
+  sites), so de-novo cannot be confirmed from parental coverage — `DN` rows are flagged
+  `DN_unconfirmed`. Inherited rows instead get `inh_lowqual` when the parental call is low quality.
+  True de-novo confirmation needs parental gVCFs/BAMs.
 
 ---
 

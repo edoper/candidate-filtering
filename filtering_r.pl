@@ -39,6 +39,13 @@ use Data::Dumper;
 #    predictors (AM>=0.906, CADD>=28.1, EVE path, REVEL>=0.773); AR genes report
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
+#  * Automated ACMG/AMP classification (InterVar-style, TRIAGE ONLY): per-row
+#    acmg_class + acmg_criteria from the derivable subset (PVS1 via LoF, PM2/PM4,
+#    PP3/PP5, BA1/BS1/BS2/BP4/BP6/BP7), combined per ACMG 2015 rules.       [#2]
+#  * QC / artifact flags (qc_flag): lowDP, lowGQ, AB_het/AB_hom, homopolymer
+#    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
+#    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
+#    parental reference depth — DN is flagged DN_unconfirmed by design.      [#6]
 #  * Run summary printed per proband.                                  [#9]
 #
 # Splicing (Pangolin) two-pass bridge
@@ -69,6 +76,19 @@ my $SF_FREQ_MAX = 0.5;     # max gnomAD AF (%) for the NOVEL SF tiers (LoF/compu
 my $SF_AM       = 0.906;   # AlphaMissense pathogenicity (strong)
 my $SF_CADD     = 28.1;    # CADD PHRED (strong)
 my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
+
+# ── QC / artifact flags [#7] and parental-quality de-novo confidence [#6] ──
+my $QC_MIN_DP   = 15;      # depth below this -> lowDP
+my $QC_MIN_GQ   = 20;      # genotype quality below this -> lowGQ
+my $REF_FASTA   = '/home/edo/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa';
+my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopolymer check
+
+# ── Automated ACMG/AMP classification (InterVar-style, triage only) [#2] ──
+my $PM2_FREQ    = 0.005;   # gnomAD AF (%) at/below -> PM2 (absent/ultra-rare)
+my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare disease)
+my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
+my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
+my $BP4_REVEL   = 0.290;   # REVEL at/below -> BP4 (computational benign, ClinGen)
 
 #############################################################################
 # Reference hashes
@@ -216,8 +236,9 @@ sub zygosity {
     return $n1 >= 2 ? "hom" : $n1 == 1 ? "het" : "ref";
 }
 
-# Parent carrier map: chr-pos-ref-alt -> 1 if the parent carries the ALT
-# (GT contains a '1'); records with 0/0 or no-call are NOT carriers.
+# Parent carrier map: chr-pos-ref-alt -> "gt:dp:gq" if the parent carries the ALT
+# (GT contains a '1'); records with 0/0 or no-call are NOT carriers. The DP/GQ are
+# kept so inherited calls can report parental call quality [#6].
 sub load_parent {
     my ($file) = @_;
     my %carry;
@@ -229,9 +250,9 @@ sub load_parent {
         my @c = split /\t/, $line;
         my ($chr,$pos,$ref,$alt,$fmt,$smp) = @c[0,1,3,4,8,9];
         next if $alt =~ /,/;                       # should be pre-split
-        my ($gt) = parse_call($fmt,$smp);
+        my ($gt,$dp,$gq) = parse_call($fmt,$smp);
         my $z = zygosity($gt);
-        $carry{"$chr-$pos-$ref-$alt"} = 1 if $z eq "het" || $z eq "hom";
+        $carry{"$chr-$pos-$ref-$alt"} = "$gt:$dp:$gq" if $z eq "het" || $z eq "hom";
     }
     close $fh;
     return \%carry;
@@ -278,6 +299,72 @@ sub clinvar_stars {
     return 0;
 }
 
+# Is an INDEL in/adjacent to a homopolymer run (>=5)? Error-prone context. [#7]
+my %hp_cache;
+sub homopolymer_context {
+    my ($chr,$pos,$ref,$alt) = @_;
+    return 0 unless $HAVE_REF;
+    return 0 if length($ref) == length($alt);           # SNV/MNV only flag indels
+    my $key = "$chr-$pos";
+    return $hp_cache{$key} if exists $hp_cache{$key};
+    my $a = $pos - 12; $a = 1 if $a < 1;
+    my $b = $pos + 12;
+    my $seq = qx(samtools faidx "$REF_FASTA" "$chr:$a-$b" 2>/dev/null);
+    $seq =~ s/^>.*\n//; $seq =~ s/\s+//g;
+    my $hp = ($seq ne "" && $seq =~ /(.)\1{4,}/) ? 1 : 0;
+    return $hp_cache{$key} = $hp;
+}
+
+# Automated ACMG/AMP classification (InterVar-style, TRIAGE ONLY — not a final
+# clinical classification). Assigns the subset of criteria derivable from the
+# available annotations and combines them per ACMG 2015 rules. [#2]
+sub acmg_classify {
+    my (%v) = @_;
+    my (@P,@B);
+    # Pathogenic-leaning
+    push @P, "PVS1" if $v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC");
+    push @P, "PM4"  if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
+    push @P, "PM2"  if $v{freq} <= $PM2_FREQ;
+    my $ncomp = 0;
+    $ncomp++ if $v{am_score} ne "" && $v{am_score} >= $SF_AM;
+    $ncomp++ if $v{cadd_num} >= $SF_CADD;
+    $ncomp++ if $v{eve_class} =~ /athogenic/;
+    $ncomp++ if $v{revel} ne "" && $v{revel} >= $SF_REVEL;
+    push @P, "PP3"  if $ncomp >= 2;
+    push @P, "PP5"  if clinvar_pathogenic($v{clnsig});
+    # Benign-leaning
+    push @B, "BA1"  if $v{freq} >= $BA1_FREQ;
+    push @B, "BS1"  if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
+    push @B, "BS2"  if $v{nhom} ne "" && $v{nhom} >= $BS2_NHOM;
+    push @B, "BP4"  if $v{revel} ne "" && $v{revel} <= $BP4_REVEL;
+    push @B, "BP6"  if clinvar_benign($v{clnsig});
+    push @B, "BP7"  if $v{consequence} =~ /synonymous_variant/
+                    && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2);
+
+    # Combine (PS/PM1/PM5/PP2 not assessed; PM2 treated as moderate).
+    my $pvs = grep { /^PVS/ } @P;
+    my $pm  = grep { /^PM/  } @P;
+    my $pp  = grep { /^PP/  } @P;
+    my $ba  = grep { /^BA/  } @B;
+    my $bs  = grep { /^BS/  } @B;
+    my $bp  = grep { /^BP/  } @B;
+
+    my $path = ($pvs && ($pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2));
+    my $lp   = (($pvs && $pm >= 1) || $pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4));
+    my $ben  = ($ba || $bs >= 2);
+    my $lb   = (($bs >= 1 && $bp >= 1) || $bp >= 2);
+
+    my $pathy = $path || $lp;
+    my $beny  = $ben  || $lb;
+    my $class = ($pathy && $beny)  ? "Conflicting"
+              :  $path             ? "Pathogenic"
+              :  $lp               ? "Likely_pathogenic"
+              :  $ben              ? "Benign"
+              :  $lb               ? "Likely_benign"
+              :                      "VUS";
+    return ($class, join(",", @P, @B));
+}
+
 #############################################################################
 # Discover trios / duos from filenames
 #############################################################################
@@ -314,7 +401,8 @@ my @COLS = qw(
     loftee loftee_filter loftee_flags
     gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
     zygosity GT DP GQ AB
-    inheritance recessive_flag kept_by Association MOI GDV
+    inheritance recessive_flag kept_by acmg_class acmg_criteria qc_flag
+    Association MOI GDV
 );
 
 #############################################################################
@@ -432,12 +520,12 @@ foreach my $proband (@probands) {
                 $cand_structural = ($freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
             }
 
-            # EMIT pass: only candidate structural-pass variants need Pangolin.
-            if (!$final) {
-                $emit{$my_id} = "$chr,$start,$ref,$alt"
-                    if $cand_structural && !exists $emit{$my_id};
-                next;
-            }
+            # Collect candidate structural-pass variants for Pangolin. Done in BOTH
+            # passes so the input CSV is (re)written with the full set even in the
+            # final pass (otherwise it would be emptied and the score cache wiped).
+            $emit{$my_id} = "$chr,$start,$ref,$alt"
+                if $cand_structural && !exists $emit{$my_id};
+            next unless $final;
             $stat{structural}++ if $cand_structural;
 
             # ── FINAL pass: extract scoring fields (shared by both paths) ──
@@ -525,6 +613,33 @@ foreach my $proband (@probands) {
                 $inheritance = "NA";
             }
 
+            # ── [#6] Parental call quality for inherited variants ──
+            my $inh_lowqual = 0;
+            for my $par ($in_m ? $mama->{$my_id} : (), $in_f ? $papa->{$my_id} : ()) {
+                my (undef,$pdp,$pgq) = split /:/, $par;
+                $inh_lowqual = 1 if ($pdp ne "" && $pdp < $QC_MIN_DP)
+                                 || ($pgq ne "" && $pgq < $QC_MIN_GQ);
+            }
+
+            # ── [#7] QC / artifact flags ──
+            my @qc;
+            push @qc, "lowDP"  if $dp ne "" && $dp < $QC_MIN_DP;
+            push @qc, "lowGQ"  if $gq ne "" && $gq < $QC_MIN_GQ;
+            if ($ab ne "") {
+                push @qc, "AB_het" if $zyg eq "het" && ($ab < 0.25 || $ab > 0.75);
+                push @qc, "AB_hom" if $zyg eq "hom" && $ab < 0.85;
+            }
+            push @qc, "homopolymer"   if homopolymer_context($chr,$start,$ref,$alt);
+            push @qc, "inh_lowqual"   if $inh_lowqual;
+            push @qc, "DN_unconfirmed" if $inheritance =~ /^DN/;   # no parental ref depth
+            my $qc_flag = join(";", @qc);
+
+            # ── [#2] Automated ACMG/AMP classification (triage) ──
+            my ($acmg_class,$acmg_crit) = acmg_classify(
+                consequence=>$consequence, lof_type=>$lof_type, loftee=>$loftee,
+                freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
+                eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin);
+
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
                 class=>$class, sf_ar=>$sf_ar,
@@ -540,6 +655,7 @@ foreach my $proband (@probands) {
                     gnomAD_nhomalt=>$g_nhom, gnomAD_filter=>$g_filter,
                     zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
                     inheritance=>$inheritance, recessive_flag=>"", kept_by=>$kept_by,
+                    acmg_class=>$acmg_class, acmg_criteria=>$acmg_crit, qc_flag=>$qc_flag,
                     Association=>($assoc//""), MOI=>$moi, GDV=>($gdv//""),
                 },
             };
