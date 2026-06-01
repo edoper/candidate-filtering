@@ -25,6 +25,7 @@
 !g4e-2025.txt
 !typevar.txt
 !mane-plus-clinical-names.txt
+!acmg_sf_v3.2.txt
 
 # Explicitly DO NOT track (already covered by "*", listed here as documentation
 # of what must never be committed):

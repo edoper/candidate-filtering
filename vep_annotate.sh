@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────
 #  VEP annotation pipeline with:
-#    - All plugins: LoF (LOFTEE), REVEL, AlphaMissense, EVE, CADD
+#    - All plugins: LoF (LOFTEE), REVEL, AlphaMissense, EVE, CADD (SNV + indel)
 #    - Custom annotation: gnomAD v4.1 joint (PASS + EXOMES_FILTERED + GENOMES_FILTERED)
 #                         exposing AC_joint, AN_joint, AF_joint, nhomalt_joint, FILTER
 #    - Custom annotation: ClinVar (NCBI weekly VCF, chr-prefixed) exposing
@@ -31,6 +31,8 @@ VEP_DATA="$HOME/vep_data"
 VEP_REFS="$HOME/vep_refs"
 GNOMAD_VCF="$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz"
 CLINVAR_VCF="$VEP_REFS/clinvar/clinvar.chr.vcf.gz"
+CADD_SNV="$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz"            # CADD GRCh38 v1.7
+CADD_INDEL="$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz" # CADD GRCh38 v1.7 indels
 
 # ── Environment ──
 export PERL5LIB="$HOME/.vep/Plugins/loftee:$HOME/perl5/lib/perl5:${PERL5LIB:-}"
@@ -39,6 +41,8 @@ export LD_PRELOAD="$HOME/htslib/libhts.so${LD_PRELOAD:+:$LD_PRELOAD}"
 # ── Sanity checks ──
 [[ -x "$VEP"        ]] || { echo "ERROR: VEP not found at $VEP" >&2; exit 1; }
 [[ -s "$GNOMAD_VCF" ]] || { echo "ERROR: gnomAD custom VCF not found: $GNOMAD_VCF" >&2; exit 1; }
+[[ -s "$CADD_SNV"   ]] || { echo "ERROR: CADD SNV file not found: $CADD_SNV" >&2; exit 1; }
+[[ -s "$CADD_INDEL" ]] || { echo "ERROR: CADD indel file not found: $CADD_INDEL" >&2; exit 1; }
 [[ -s "$CLINVAR_VCF" ]] || { echo "ERROR: ClinVar custom VCF not found: $CLINVAR_VCF" >&2; exit 1; }
 [[ -s "$INPUT"      ]] || { echo "ERROR: input not found or empty: $INPUT" >&2; exit 1; }
 
@@ -139,7 +143,7 @@ VEP_INPUT="$NORM_INPUT"
   --plugin REVEL,"$VEP_REFS/REVEL/new_tabbed_revel_grch38.tsv.gz" \
   --plugin AlphaMissense,file="$VEP_REFS/AlphaMissense/AlphaMissense_hg38.tsv.gz" \
   --plugin EVE,file="$VEP_REFS/EVE/eve_merged.vcf.gz" \
-  --plugin CADD,"$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz" \
+  --plugin CADD,"$CADD_SNV","$CADD_INDEL" \
   --custom file="$GNOMAD_VCF",short_name=gnomADmin,format=vcf,type=exact,fields=AC_joint%AN_joint%AF_joint%nhomalt_joint%FILTER \
   --custom file="$CLINVAR_VCF",short_name=ClinVar,format=vcf,type=exact,fields=CLNSIG%CLNREVSTAT%CLNDN
 

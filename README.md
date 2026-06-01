@@ -23,6 +23,7 @@ inheritance and recessive context for **downstream manual curation**.
 | `g4e-2025.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. |
 | `typevar.txt` | Consequence whitelist (atomic terms; matched per `&`-separated sub-term). |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript IDs; only these transcripts are considered. |
+| `acmg_sf_v3.2.txt` | ACMG SF v3.2 secondary-findings genes (81): `gene⇥condition⇥MOI⇥report_category`. Always scanned. |
 
 ---
 
@@ -125,6 +126,28 @@ revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
 clinvar_sig, clinvar_stars, clinvar_disease, loftee, loftee_filter, loftee_flags,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
 zygosity, GT, DP, GQ, AB, inheritance, recessive_flag, kept_by, Association, MOI, GDV`
+
+---
+
+## Secondary findings (ACMG SF v3.2)
+
+The **81 ACMG SF v3.2 genes** (`acmg_sf_v3.2.txt`) are **always** scanned, independent of the
+candidate `--genes` panel, with a **stricter** gate than candidates. Findings are written into
+the **same** `.candidatos` output, flagged **`GDV = Incidental`** (with `Association`/`MOI` from the
+ACMG table and `kept_by` = the evidence tier). Curators split primary vs secondary on the GDV column.
+
+Inclusion (any one):
+- **`ClinVar_P/LP`** — ClinVar Pathogenic/Likely-pathogenic with **≥1 review star** (frequency-agnostic,
+  so known founder alleles are not lost). *Known / directly reportable.*
+- **`LoF`** — novel LOFTEE-HC. *Expected pathogenic (review-queue; verify gene mechanism).*
+- **`Computational`** — **≥2 of** AM ≥ 0.906, CADD ≥ 28.1, EVE Pathogenic, REVEL ≥ 0.773
+  (rarity-capped). *Candidate SF requiring expert classification — not auto-reportable.*
+
+Gene-specific rules from the ACMG table are honored: `TTN` truncating-only, `HFE` C282Y-homozygotes-only,
+and recessive (AR) genes are reported **biallelic-only** (hom or comp-het). Thresholds are `$SF_*`
+constants in `filtering_r.pl`.
+
+> ⚠️ Secondary findings carry distinct **consent / reporting** obligations — handle per your lab policy.
 
 ---
 

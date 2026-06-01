@@ -1,0 +1,87 @@
+# ACMG SF v3.2 secondary-findings genes (81 genes).
+# Columns: gene <tab> condition <tab> MOI <tab> report_category
+#   report_category: ALL_PLP        = report all P/LP per the inclusion gate
+#                    TRUNCATING_ONLY = only truncating (LoF) variants (TTN)
+#                    C282Y_HOM       = only HFE c.845G>A p.C282Y homozygotes
+#   MOI AR/XL genes: recessive -> report biallelic only (hom / comp-het).
+APC	Adenomatous polyposis / FAP	AD	ALL_PLP
+MYH11	Familial thoracic aortic aneurysm 4	AD	ALL_PLP
+ACTA2	Familial thoracic aortic aneurysm 6	AD	ALL_PLP
+TMEM43	Arrhythmogenic RV cardiomyopathy 5	AD	ALL_PLP
+DSP	ARVC 8 / dilated cardiomyopathy	AD	ALL_PLP
+PKP2	ARVC 9	AD	ALL_PLP
+DSG2	ARVC 10	AD	ALL_PLP
+DSC2	ARVC 11	AD	ALL_PLP
+BTD	Biotinidase deficiency	AR	ALL_PLP
+BRCA1	Hereditary breast-ovarian cancer 1	AD	ALL_PLP
+BRCA2	Hereditary breast-ovarian cancer 2	AD	ALL_PLP
+SCN5A	Brugada 1 / DCM 1E / LQT 3	AD	ALL_PLP
+RYR2	CPVT 1	AD	ALL_PLP
+CASQ2	CPVT 2	AR	ALL_PLP
+CALM1	CPVT 4 / LQT 14	AD	ALL_PLP
+TRDN	CPVT 5 / LQT	AR	ALL_PLP
+FLNC	Dilated cardiomyopathy / myofibrillar myopathy 5	AD	ALL_PLP
+LMNA	Dilated cardiomyopathy 1A	AD	ALL_PLP
+TNNT2	DCM 1D / HCM 2	AD	ALL_PLP
+DES	DCM 1I / myofibrillar myopathy 1	AD	ALL_PLP
+MYH7	DCM 1S / HCM 1	AD	ALL_PLP
+TNNC1	Dilated cardiomyopathy 1Z	AD	ALL_PLP
+RBM20	Dilated cardiomyopathy 1DD	AD	ALL_PLP
+BAG3	DCM 1HH / myofibrillar myopathy 6	AD	ALL_PLP
+TTN	Dilated cardiomyopathy (truncating only)	AD	TRUNCATING_ONLY
+COL3A1	Ehlers-Danlos syndrome type 4	AD	ALL_PLP
+GLA	Fabry disease	XL	ALL_PLP
+LDLR	Familial hypercholesterolemia 1	AD	ALL_PLP
+APOB	Familial hypercholesterolemia 2	AD	ALL_PLP
+MYBPC3	Hypertrophic cardiomyopathy 4	AD	ALL_PLP
+PRKAG2	Hypertrophic cardiomyopathy 6	AD	ALL_PLP
+TNNI3	Hypertrophic cardiomyopathy 7	AD	ALL_PLP
+MYL3	Hypertrophic cardiomyopathy 8	AD	ALL_PLP
+MYL2	Hypertrophic cardiomyopathy 10	AD	ALL_PLP
+ACTC1	Hypertrophic cardiomyopathy 11	AD	ALL_PLP
+TPM1	Hypertrophic cardiomyopathy 3	AD	ALL_PLP
+RET	MEN 2A/2B / familial medullary thyroid carcinoma	AD	ALL_PLP
+PALB2	Hereditary breast cancer	AD	ALL_PLP
+HFE	Hereditary hemochromatosis	AR	C282Y_HOM
+ENG	Hereditary hemorrhagic telangiectasia 1	AD	ALL_PLP
+ACVRL1	Hereditary hemorrhagic telangiectasia 2	AD	ALL_PLP
+SDHD	Hereditary paraganglioma-pheochromocytoma	SD	ALL_PLP
+SDHB	Hereditary paraganglioma-pheochromocytoma	AD	ALL_PLP
+TTR	Hereditary transthyretin amyloidosis	AD	ALL_PLP
+PCSK9	Autosomal dominant hypercholesterolemia 3	AD	ALL_PLP
+BMPR1A	Juvenile polyposis syndrome	AD	ALL_PLP
+SMAD4	Juvenile polyposis / JP-HHT	AD	ALL_PLP
+TP53	Li-Fraumeni syndrome 1	AD	ALL_PLP
+TGFBR1	Loeys-Dietz syndrome 1A	AD	ALL_PLP
+TGFBR2	Loeys-Dietz syndrome 1B	AD	ALL_PLP
+SMAD3	Loeys-Dietz syndrome 3	AD	ALL_PLP
+KCNQ1	Long QT syndrome 1	AD	ALL_PLP
+KCNH2	Long QT syndrome 2	AD	ALL_PLP
+CALM2	Long QT syndrome 15 / CPVT	AD	ALL_PLP
+CALM3	Long QT syndrome 16 / CPVT	AD	ALL_PLP
+MSH2	Lynch syndrome 1	AD	ALL_PLP
+MLH1	Lynch syndrome 2	AD	ALL_PLP
+PMS2	Lynch syndrome 4	AD	ALL_PLP
+MSH6	Lynch syndrome 5	AD	ALL_PLP
+RYR1	Malignant hyperthermia susceptibility 1	AD	ALL_PLP
+CACNA1S	Malignant hyperthermia susceptibility 5	AD	ALL_PLP
+FBN1	Marfan syndrome	AD	ALL_PLP
+HNF1A	Maturity-onset diabetes of the young	AD	ALL_PLP
+MEN1	Multiple endocrine neoplasia type 1	AD	ALL_PLP
+MUTYH	MUTYH-associated polyposis	AR	ALL_PLP
+NF2	Neurofibromatosis type 2	AD	ALL_PLP
+OTC	Ornithine transcarbamylase deficiency	XL	ALL_PLP
+SDHAF2	Paragangliomas 2	SD	ALL_PLP
+SDHC	Paragangliomas 3	AD	ALL_PLP
+STK11	Peutz-Jeghers syndrome	AD	ALL_PLP
+MAX	Hereditary pheochromocytoma	AD	ALL_PLP
+TMEM127	Hereditary pheochromocytoma	AD	ALL_PLP
+GAA	Pompe disease	AR	ALL_PLP
+PTEN	PTEN hamartoma tumor syndrome	AD	ALL_PLP
+RB1	Retinoblastoma	AD	ALL_PLP
+RPE65	RPE65-related retinopathy	AR	ALL_PLP
+TSC1	Tuberous sclerosis 1	AD	ALL_PLP
+TSC2	Tuberous sclerosis 2	AD	ALL_PLP
+VHL	Von Hippel-Lindau syndrome	AD	ALL_PLP
+WT1	Wilms tumor / WT1 disorder	AD	ALL_PLP
+ATP7B	Wilson disease	AR	ALL_PLP

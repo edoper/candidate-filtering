@@ -33,6 +33,12 @@ use Data::Dumper;
 #    phaseable) flags.                                                 [#6]
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
+#  * ACMG SF secondary findings: the 81 ACMG SF v3.2 genes are ALWAYS scanned
+#    (independent of the candidate panel) with a STRICTER gate — ClinVar P/LP
+#    (>=1 star, frequency-agnostic) OR novel LOFTEE-HC OR >=2 strong computational
+#    predictors (AM>=0.906, CADD>=28.1, EVE path, REVEL>=0.773); AR genes report
+#    biallelic only. These appear in the SAME candidatos output flagged with
+#    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
 #  * Run summary printed per proband.                                  [#9]
 #
 # Splicing (Pangolin) two-pass bridge
@@ -55,6 +61,14 @@ my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 # High-impact loss-of-function consequences (LoF rescue arm; see inclusion gate).
 my %LOF_CONS = map { $_ => 1 }
     qw(frameshift_variant stop_gained splice_acceptor_variant splice_donor_variant start_lost);
+
+# ── ACMG SF secondary findings (always evaluated; stricter than candidates) ──
+# Emitted into the SAME candidatos output, flagged GDV=Incidental.
+my $ACMG_FILE   = 'acmg_sf_v3.2.txt';
+my $SF_FREQ_MAX = 0.5;     # max gnomAD AF (%) for the NOVEL SF tiers (LoF/computational)
+my $SF_AM       = 0.906;   # AlphaMissense pathogenicity (strong)
+my $SF_CADD     = 28.1;    # CADD PHRED (strong)
+my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
 
 #############################################################################
 # Reference hashes
@@ -111,6 +125,21 @@ my %varfilter;
 while (my $t = <VAR>) { chomp $t; my ($c,$d) = split /\t/, $t; $varfilter{$c} = $d//""; }
 close VAR;
 print "hash var, listo!\n";
+
+# ACMG SF v3.2 genes: gene -> "condition \t MOI \t report_category". Always loaded
+# (independent of the candidate panel). Non-fatal if absent.
+my %acmg;
+if (open my $afh, "<", $ACMG_FILE) {
+    while (my $g = <$afh>) {
+        chomp $g; next if $g =~ /^#/ || $g !~ /\S/;
+        my ($sym,$cond,$moi,$cat) = split /\t/, $g;
+        $acmg{$sym} = join("\t", $cond//"", $moi//"AD", $cat//"ALL_PLP");
+    }
+    close $afh;
+    printf "ACMG SF: %d genes (secondary findings, always evaluated)\n", scalar keys %acmg;
+} else {
+    warn "WARN: $ACMG_FILE not found — secondary findings (Incidental) disabled\n";
+}
 
 #############################################################################
 # Helpers
@@ -238,6 +267,16 @@ sub clinvar_benign {
     return 0 unless defined $s && $s ne "";
     return ($s =~ /benign/i && $s !~ /pathogenic/i) ? 1 : 0;
 }
+# ClinVar review status (CLNREVSTAT) -> star count (0-4).
+sub clinvar_stars {
+    my ($s) = @_;
+    return 0 unless defined $s && $s ne "";
+    return 4 if $s =~ /practice_guideline/i;
+    return 3 if $s =~ /expert_panel/i;
+    return 2 if $s =~ /multiple_submitters/i;
+    return 1 if $s =~ /single_submitter|criteria_provided/i;
+    return 0;
+}
 
 #############################################################################
 # Discover trios / duos from filenames
@@ -341,8 +380,7 @@ foreach my $proband (@probands) {
     if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
 
     # Run statistics [#9].
-    my %stat = (lines=>0, multiallelic=>0, structural=>0, rare=>0, candidates=>0);
-    my (%by_arm, %by_inh, %by_flag);
+    my %stat = (lines=>0, multiallelic=>0, structural=>0);
 
     my %emit;            # EMIT pass: unique candidate variants
     my @rows;            # FINAL pass: buffered rows (for per-gene recessive logic)
@@ -374,32 +412,35 @@ foreach my $proband (@probands) {
             my $transcript  = field(\@r,$i{transcript});
             my $consequence = field(\@r,$i{consequence});
 
-            # ── Structural gates (AND) ──
-            next unless exists $mane{$transcript};
-            next unless consequence_ok($consequence);          # [#1] per-atom
-            next unless exists $epigenes{$gene};
-
-            my ($assoc,$moi,$gdv) = split /\t/, $epigenes{$gene};
-            $moi //= "";
+            next unless exists $mane{$transcript};   # both paths require MANE
+            my $in_panel = exists $epigenes{$gene};
+            my $in_acmg  = exists $acmg{$gene};
+            next unless $in_panel || $in_acmg;
 
             my $g_ac = field(\@r,$i{g_ac}); $g_ac = ($g_ac eq "") ? 0 : $g_ac;
             my $g_an = field(\@r,$i{g_an}); $g_an = ($g_an eq "") ? 0 : $g_an;
             my $freq = ($g_an > 0) ? ($g_ac/$g_an)*100 : 0;
 
-            # [#6] MOI-aware rarity: recessive genes tolerate higher carrier freq.
-            my $recessive = ($moi =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0;
-            my $freqmax   = $recessive ? $FREQ_AR : $FREQ_AD;
-            next unless $freq <= $freqmax;
+            # Candidate structural gate: panel gene + whitelisted consequence + rare
+            # (MOI-aware: recessive genes tolerate higher carrier freq). [#1,#6]
+            my $cand_structural = 0;
+            my ($p_assoc,$p_moi,$p_gdv) = ("","","");
+            if ($in_panel && consequence_ok($consequence)) {
+                ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene};
+                $p_moi //= "";
+                my $recessive = ($p_moi =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0;
+                $cand_structural = ($freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
+            }
 
-            $stat{structural}++;
-            $stat{rare}++;
+            # EMIT pass: only candidate structural-pass variants need Pangolin.
+            if (!$final) {
+                $emit{$my_id} = "$chr,$start,$ref,$alt"
+                    if $cand_structural && !exists $emit{$my_id};
+                next;
+            }
+            $stat{structural}++ if $cand_structural;
 
-            # Always collect candidate positions (Pangolin input is rewritten
-            # every run so it tracks the current gene list / thresholds).
-            $emit{$my_id} = "$chr,$start,$ref,$alt" unless exists $emit{$my_id};
-            next unless $final;          # final-pass processing needs the scores
-
-            # ── FINAL pass ──
+            # ── FINAL pass: extract scoring fields (shared by both paths) ──
             my $revel     = field(\@r,$i{revel});
             my $eve_class = field(\@r,$i{eve_class});
             my $eve_score = field(\@r,$i{eve_score});
@@ -419,23 +460,54 @@ foreach my $proband (@probands) {
             my $hgvsp     = field(\@r,$i{hgvsp});
             my $tpos      = field(\@r,$i{tpos});
             my $pangolin  = exists $pscore->{$my_id} ? $pscore->{$my_id} : "";
+            my $cadd_num  = ($cadd eq "") ? 0 : $cadd;
+            my $lof_type  = grep { $LOF_CONS{$_} } split /&/, $consequence;
 
-            # ── Inclusion gate (OR) + record which arm(s) fired [#4,#8] ──
-            my @kept;
-            my $cadd_num = ($cadd eq "") ? 0 : $cadd;
-            push @kept, "CADD"     if $cadd_num >= $CADD_MIN;
-            push @kept, "AM"       if $am_class  =~ /athogenic/;
-            push @kept, "EVE"      if $eve_class =~ /athogenic/;
-            push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
-            push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
-            push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
-            # Loss-of-function rescue: LOFTEE high-confidence always; otherwise a
-            # high-impact LoF consequence rescues it UNLESS LOFTEE downgraded it
-            # to low-confidence. (CADD is SNV-only and the missense predictors do
-            # not apply to frameshift/stop/splice indels, so without this arm
-            # truncating variants like a frameshift in a disease gene are missed.)
-            my $lof_type = grep { $LOF_CONS{$_} } split /&/, $consequence;
-            push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
+            # ── Primary candidate inclusion gate (OR) [#4,#8] ──
+            my (@kept, $class, $assoc, $moi, $gdv);
+            if ($cand_structural) {
+                push @kept, "CADD"     if $cadd_num >= $CADD_MIN;
+                push @kept, "AM"       if $am_class  =~ /athogenic/;
+                push @kept, "EVE"      if $eve_class =~ /athogenic/;
+                push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
+                push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
+                push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
+                push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
+                if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
+            }
+
+            # ── Incidental (ACMG SF) — stringent; only if not a primary candidate ──
+            # ClinVar P/LP (>=1 star) reported regardless of frequency (known founder
+            # alleles); novel LoF / >=2-strong-computational tiers require rarity.
+            my $sf_ar = 0;
+            if (!@kept && $in_acmg) {
+                my ($a_cond,$a_moi,$a_cat) = split /\t/, $acmg{$gene};
+                my $cat_ok =
+                    ($a_cat eq "TRUNCATING_ONLY") ? ($lof_type ? 1 : 0)
+                  : ($a_cat eq "C282Y_HOM")
+                        ? ((($hgvsc =~ /845G>A/ || $hgvsp =~ /Cys282Tyr/i) && $zyg eq "hom") ? 1 : 0)
+                  : 1;
+                if ($cat_ok) {
+                    my @sf;
+                    push @sf, "ClinVar_P/LP"
+                        if clinvar_pathogenic($clnsig) && clinvar_stars($clnstars) >= 1;
+                    if ($freq <= $SF_FREQ_MAX) {
+                        push @sf, "LoF" if $loftee eq "HC";
+                        my $ncomp = 0;
+                        $ncomp++ if $am_score ne "" && $am_score >= $SF_AM;
+                        $ncomp++ if $cadd_num >= $SF_CADD;
+                        $ncomp++ if $eve_class =~ /athogenic/;
+                        $ncomp++ if $revel ne "" && $revel >= $SF_REVEL;
+                        push @sf, "Computational" if $ncomp >= 2;
+                    }
+                    if (@sf) {
+                        @kept = @sf; $class = "incidental";
+                        ($assoc,$moi,$gdv) = ($a_cond, $a_moi, "Incidental");
+                        $sf_ar = ($a_moi =~ /\bAR\b/) ? 1 : 0;
+                    }
+                }
+            }
+
             next unless @kept;
             my $kept_by = join(";", @kept);
 
@@ -453,12 +525,9 @@ foreach my $proband (@probands) {
                 $inheritance = "NA";
             }
 
-            $stat{candidates}++;
-            $by_arm{$_}++ for @kept;
-            $by_inh{$inheritance}++;
-
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
+                class=>$class, sf_ar=>$sf_ar,
                 data=>{
                     chr=>$chr, start=>$start, end=>$start, ref=>$ref, alt=>$alt,
                     gene=>$gene, strand=>$strand, transcript=>$transcript,
@@ -511,13 +580,17 @@ foreach my $proband (@probands) {
         }
         $gene_flag{$g} = $flag;
     }
+    # Recessive ACMG SF genes: report biallelic only (hom or comp-het); drop carriers.
+    @rows = grep {
+        !( $_->{sf_ar} && !($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/) )
+    } @rows;
+
     for my $row (@rows) {
-        my $f = ($row->{zyg} eq "hom") ? "HOM" : ($gene_flag{$row->{gene}} || "");
-        $row->{data}{recessive_flag} = $f;
-        $by_flag{$f}++ if $f ne "";
+        $row->{data}{recessive_flag} =
+            ($row->{zyg} eq "hom") ? "HOM" : ($gene_flag{$row->{gene}} || "");
     }
 
-    # ── Write candidatos ──
+    # ── Write candidatos (primary + Incidental, distinguished by the GDV column) ──
     open OUT, ">$proband.$PANEL_TAG.candidatos" or die "out: $!";
     print OUT join("\t", @COLS), "\n";
     for my $row (@rows) {
@@ -526,9 +599,17 @@ foreach my $proband (@probands) {
     close OUT;
 
     # ── [#9] Run summary ──
+    my ($n_prim,$n_inc) = (0,0);
+    my (%by_arm,%by_inh,%by_flag);
+    for my $row (@rows) {
+        $row->{class} eq "incidental" ? $n_inc++ : $n_prim++;
+        $by_arm{$_}++ for split /;/, $row->{data}{kept_by};
+        $by_inh{$row->{data}{inheritance}}++;
+        $by_flag{$row->{data}{recessive_flag}}++ if $row->{data}{recessive_flag} ne "";
+    }
     print  "  -> $proband.$PANEL_TAG.candidatos\n";
-    printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass(rows) | %d candidate-rows\n",
-           $stat{lines}, $stat{multiallelic}, $stat{structural}, $stat{candidates};
+    printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
+           $stat{lines}, $stat{multiallelic}, $stat{structural}, $n_prim, $n_inc;
     print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
     print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
     print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
