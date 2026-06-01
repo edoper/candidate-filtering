@@ -23,8 +23,9 @@ use Data::Dumper;
 #  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
 #    gnomAD AF than dominant genes.                                    [#6]
 #  * Inclusion (rescue) gate (OR): CADD>=22, AlphaMissense path, EVE path,
-#    REVEL>=0.5, Pangolin>=0.5, ClinVar P/LP. Each surviving row records
-#    which arm(s) fired in a `kept_by` column.                    [#4,#8]
+#    REVEL>=0.5, Pangolin>=0.5, ClinVar P/LP, LoF (LOFTEE HC or high-impact
+#    truncating consequence). Each surviving row records which arm(s) fired in
+#    a `kept_by` column.                                          [#4,#8]
 #  * Genotype-aware: proband zygosity / DP / GQ / allele-balance columns from
 #    FORMAT; parent inheritance uses parental GT (carrier = non-ref), not mere
 #    site presence.                                                [#5,#10]
@@ -36,10 +37,11 @@ use Data::Dumper;
 #
 # Splicing (Pangolin) two-pass bridge
 # -----------------------------------
-#  If <proband>.pangolin.tsv is ABSENT, the script writes
-#  <proband>.pangolin_input.csv (the structural-pass candidates) and stops for
-#  that proband. Run Pangolin (run_filtering.sh) to create the .tsv, then
-#  re-run to produce <proband>.germline.candidatos.
+#  If <proband>.<panel>.pangolin.tsv is ABSENT, the script writes
+#  <proband>.<panel>.pangolin_input.csv (the structural-pass candidates) and
+#  stops for that proband. Run Pangolin (run_filtering.sh) to create the .tsv,
+#  then re-run to produce <proband>.<panel>.candidatos.  (<panel> = panel
+#  basename, so different gene lists produce side-by-side outputs.)
 #############################################################################
 
 # ── Tunable thresholds (single source of truth) ──
@@ -49,6 +51,10 @@ my $FREQ_AR    = 1.0;    # max gnomAD AF (%) for recessive genes (carrier freq)
 my $CADD_MIN   = 22;     # CADD PHRED rescue threshold
 my $REVEL_MIN  = 0.5;    # REVEL rescue threshold (permissive; ClinGen PP3 ~0.644)
 my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
+
+# High-impact loss-of-function consequences (LoF rescue arm; see inclusion gate).
+my %LOF_CONS = map { $_ => 1 }
+    qw(frameshift_variant stop_gained splice_acceptor_variant splice_donor_variant start_lost);
 
 #############################################################################
 # Reference hashes
@@ -60,16 +66,44 @@ while (my $m = <MANE>) { chomp $m; my ($a,$b) = split /\t/, $m; $mane{$a} = $b; 
 close MANE;
 print "hash mane, listo!\n";
 
-# G4E panel: gene -> "Association \t MOI \t GDV"
-open G4E, "<g4e-2025.txt" or die "g4e: $!";
-my %epigenes;
-while (my $g = <G4E>) {
-    chomp $g;
-    my ($a,$b,$c,$d) = split /\t/, $g;
-    $epigenes{$a} = join("\t", $b//"", $c//"", $d//"");
+# ── Argument parsing ──
+#   --proband NAME   (repeatable) force NAME as a proband, overriding filename-
+#                    based auto-discovery. NAME must have <NAME>.germline.vep.vcf.gz.
+#   <positional>     genes-of-interest file (gene panel override; see below).
+#
+# Gene panel: gene -> "Association \t MOI \t GDV".
+#   Default source = g4e-2025.txt (4 columns). A genes-of-interest file (one gene
+#   symbol per line; plain symbols -> Association/MOI/GDV = "NA", or full 4-column
+#   g4e format) overrides it. '#' comments and blanks are skipped.
+my (@force_probands, $GENES_FILE);
+while (@ARGV) {
+    my $a = shift @ARGV;
+    if    ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
+    elsif ($a =~ /^--proband=(.+)$/)        { push @force_probands, $1; }
+    else                                    { $GENES_FILE = $a; }   # positional = genes file
 }
-close G4E;
-print "hash G4E, listo!\n";
+my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2025.txt";
+my $custom_panel = (defined $GENES_FILE && $GENES_FILE ne "") ? 1 : 0;
+
+# Output tag = panel basename without extension (e.g. g4e-2025, Hyperparathyroidism).
+# All per-run outputs are namespaced by it so different panels don't overwrite.
+my $PANEL_TAG = $PANEL;
+$PANEL_TAG =~ s{.*/}{};
+$PANEL_TAG =~ s/\.[^.]+$//;
+
+open PANEL, "<", $PANEL or die "gene panel '$PANEL': $!";
+my %epigenes;
+while (my $g = <PANEL>) {
+    $g =~ s/\r?\n$//;
+    $g =~ s/^\s+|\s+$//g;
+    next if $g eq "" || $g =~ /^#/;
+    my @f = split /\t/, $g;
+    my $sym = $f[0];
+    $epigenes{$sym} = (@f >= 4) ? join("\t", $f[1], $f[2], $f[3]) : "NA\tNA\tNA";
+}
+close PANEL;
+printf "gene panel: %s (%d genes%s)\n", $PANEL, scalar(keys %epigenes),
+       $custom_panel ? ", custom — missing Association/MOI/GDV = NA" : "";
 
 # Consequence whitelist (atomic terms recommended; compound entries harmless).
 open VAR, "<typevar.txt" or die "typevar: $!";
@@ -217,10 +251,21 @@ my %is_parent;
 for my $s (keys %file_for) {
     $is_parent{$s} = 1 if $s =~ /^(.+)([MF])$/ && exists $file_for{$1};
 }
-my @probands = sort grep { !$is_parent{$_} } keys %file_for;
+
+# Proband list: forced override (--proband) or filename-based auto-discovery.
+my @probands;
+if (@force_probands) {
+    for my $p (@force_probands) {
+        die "forced proband '$p' has no '$p.germline.vep.vcf.gz' in this directory\n"
+            unless exists $file_for{$p};
+    }
+    @probands = @force_probands;
+} else {
+    @probands = sort grep { !$is_parent{$_} } keys %file_for;
+}
 
 print "muestras encontradas: ", join(", ", sort keys %file_for), "\n";
-print "probandos: ", join(", ", @probands), "\n";
+print "probandos: ", join(", ", @probands), (@force_probands ? " (forced override)" : ""), "\n";
 
 # Output column order (single definition, reused for header + rows).
 my @COLS = qw(
@@ -244,7 +289,7 @@ foreach my $proband (@probands) {
     my $have_m = defined $mfile;
     my $have_f = defined $ffile;
 
-    my $tsv   = "$proband.pangolin.tsv";
+    my $tsv   = "$proband.$PANEL_TAG.pangolin.tsv";
     my $final = -e $tsv;
     my $pscore = $final ? load_scores($tsv) : {};
 
@@ -349,11 +394,10 @@ foreach my $proband (@probands) {
             $stat{structural}++;
             $stat{rare}++;
 
-            # ── EMIT pass: collect candidate positions for Pangolin ──
-            if (!$final) {
-                $emit{$my_id} = "$chr,$start,$ref,$alt" unless exists $emit{$my_id};
-                next;
-            }
+            # Always collect candidate positions (Pangolin input is rewritten
+            # every run so it tracks the current gene list / thresholds).
+            $emit{$my_id} = "$chr,$start,$ref,$alt" unless exists $emit{$my_id};
+            next unless $final;          # final-pass processing needs the scores
 
             # ── FINAL pass ──
             my $revel     = field(\@r,$i{revel});
@@ -385,6 +429,13 @@ foreach my $proband (@probands) {
             push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
             push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
             push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
+            # Loss-of-function rescue: LOFTEE high-confidence always; otherwise a
+            # high-impact LoF consequence rescues it UNLESS LOFTEE downgraded it
+            # to low-confidence. (CADD is SNV-only and the missense predictors do
+            # not apply to frameshift/stop/splice indels, so without this arm
+            # truncating variants like a frameshift in a disease gene are missed.)
+            my $lof_type = grep { $LOF_CONS{$_} } split /&/, $consequence;
+            push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
             next unless @kept;
             my $kept_by = join(";", @kept);
 
@@ -427,13 +478,14 @@ foreach my $proband (@probands) {
     }
     close $pfh;
 
-    # ── EMIT pass output ──
+    # ── Always (re)write the Pangolin candidate input for this run ──
+    my $csv = "$proband.$PANEL_TAG.pangolin_input.csv";
+    open my $cfh, ">", $csv or die "$csv: $!";
+    print $cfh "CHROM,POS,REF,ALT\n";
+    print $cfh "$emit{$_}\n" for sort keys %emit;
+    close $cfh;
+
     if (!$final) {
-        my $csv = "$proband.pangolin_input.csv";
-        open my $cfh, ">", $csv or die "$csv: $!";
-        print $cfh "CHROM,POS,REF,ALT\n";
-        print $cfh "$emit{$_}\n" for sort keys %emit;
-        close $cfh;
         printf "  EMIT: %d structural-pass variants -> %s\n", scalar(keys %emit), $csv;
         printf "  Run Pangolin on it (run_filtering.sh) to create %s, then re-run.\n", $tsv;
         next;
@@ -466,7 +518,7 @@ foreach my $proband (@probands) {
     }
 
     # ── Write candidatos ──
-    open OUT, ">$proband.germline.candidatos" or die "out: $!";
+    open OUT, ">$proband.$PANEL_TAG.candidatos" or die "out: $!";
     print OUT join("\t", @COLS), "\n";
     for my $row (@rows) {
         print OUT join("\t", map { $row->{data}{$_} // "" } @COLS), "\n";
@@ -474,7 +526,7 @@ foreach my $proband (@probands) {
     close OUT;
 
     # ── [#9] Run summary ──
-    print  "  -> $proband.germline.candidatos\n";
+    print  "  -> $proband.$PANEL_TAG.candidatos\n";
     printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass(rows) | %d candidate-rows\n",
            $stat{lines}, $stat{multiallelic}, $stat{structural}, $stat{candidates};
     print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;

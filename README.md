@@ -17,8 +17,8 @@ inheritance and recessive context for **downstream manual curation**.
 | File | Purpose |
 |------|---------|
 | `vep_annotate.sh` | Annotate a germline VCF with Ensembl VEP (plugins + custom gnomAD & ClinVar), splitting multiallelics first. Produces `*.germline.vep.vcf.gz`. |
-| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.germline.candidatos`. |
-| `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.pangolin.tsv`). |
+| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. |
+| `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.<panel>.pangolin.tsv`). |
 | `run_filtering.sh` | End-to-end driver: emit candidates → score with Pangolin → final filtering. |
 | `g4e-2025.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. |
 | `typevar.txt` | Consequence whitelist (atomic terms; matched per `&`-separated sub-term). |
@@ -37,17 +37,21 @@ inheritance and recessive context for **downstream manual curation**.
                                    │
         run_filtering.sh ─────────┼─────────────────────────────────────────────
                                    │
-   Pass 1  filtering_r.pl  ──►  <proband>.pangolin_input.csv   (structural-pass variants)
+   Pass 1  filtering_r.pl  ──►  <proband>.<panel>.pangolin_input.csv   (structural-pass variants)
                                    │
-   Pangolin (GPU, de novo)  ──►  <proband>.pangolin.csv  ──►  <proband>.pangolin.tsv
+   Pangolin (GPU, de novo)  ──►  <proband>.<panel>.pangolin.csv  ──►  <proband>.<panel>.pangolin.tsv
                                    │
-   Pass 2  filtering_r.pl  ──►  <proband>.germline.candidatos   (final, curation-ready)
+   Pass 2  filtering_r.pl  ──►  <proband>.<panel>.candidatos   (final, curation-ready)
 ```
 
-`filtering_r.pl` auto-discovers families by **filename**: `EPIC280` = proband,
-`EPIC280M` = mother, `EPIC280F` = father. It is a two-pass design — if the Pangolin
-score map is missing it emits the candidate list and stops; once scores exist it
-produces the final table.
+`filtering_r.pl` auto-discovers families by **filename**: it globs
+`*.germline.vep.vcf.gz`, takes the sample name as the filename minus that suffix, treats a
+sample ending in `M`/`F` as a parent (when the base name also exists), and analyzes the
+rest as probands (`EPIC280` = proband, `EPIC280M` = mother, `EPIC280F` = father). It is a
+two-pass design — if the Pangolin score map is missing it emits the candidate list and
+stops; once scores exist it produces the final table.
+
+You can **override** which sample is the proband (see [Forcing a proband](#forcing-a-proband)).
 
 ---
 
@@ -82,7 +86,7 @@ row per qualifying MANE transcript).
 |------|--------|------|
 | MANE transcript | `mane-plus-clinical-names.txt` | CSQ `Feature` ∈ MANE set |
 | Consequence | `typevar.txt` | consequence split on `&`; kept if **any** sub-term is whitelisted |
-| Gene panel | `g4e-2025.txt` | CSQ `SYMBOL` ∈ panel |
+| Gene panel | `g4e-2025.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
 | Rarity (MOI-aware) | gnomAD joint AC/AN | AF = AC/AN×100 ≤ threshold: **dominant `$FREQ_AD`=0.01%**, **recessive `$FREQ_AR`=1.0%** (MOI contains AR/XLR) |
 
 ### Stage 2 — Inclusion / rescue gate (at least ONE, OR)
@@ -98,6 +102,7 @@ column records which fired.
 | REVEL | `$REVEL_MIN` = 0.5 *(permissive; ClinGen PP3 ≈ 0.644)* |
 | Pangolin (splice) | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
+| LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
 
@@ -113,7 +118,7 @@ All thresholds are single constants at the top of `filtering_r.pl`.
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates) and breakdowns by `kept_by` and inheritance.
 
-### Output columns (`<proband>.germline.candidatos`, TSV)
+### Output columns (`<proband>.<panel>.candidatos`, TSV)
 
 `chr, start, end, ref, alt, gene, strand, transcript, consequence, hgvs.c, hgvs.p, tpos,
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
@@ -130,8 +135,9 @@ standalone [Pangolin](https://github.com/tkzeng/Pangolin) on GPU and merged by p
 Only the proband's **structural-pass** variants are scored (a few hundred), not the whole
 VCF. `parse_pangolin.pl` reduces each variant to `max(|increase|, |decrease|)`.
 
-> Editing the structural filters changes the candidate set — **delete
-> `<proband>.pangolin.tsv` before re-running** so scores regenerate.
+> Pangolin scores are cached per panel (`<proband>.<panel>.pangolin.tsv`) and regenerated
+> automatically when the candidate set changes (the input-CSV checksum differs) — e.g. after
+> editing the structural filters, the gene list, or re-annotating.
 
 ---
 
@@ -167,8 +173,48 @@ bash vep_annotate.sh EPIC280M.germline.vcf.gz  EPIC280M.germline.vep.vcf.gz
 
 # 2) Run the full filtering pipeline (emit → Pangolin → final)
 bash run_filtering.sh
-#    → EPIC280.germline.candidatos
+#    → EPIC280.g4e-2025.candidatos
 ```
+
+### Custom gene list (genes of interest)
+
+By default the panel is `g4e-2025.txt`. To restrict to a different gene set, pass a
+genes-of-interest file (one gene symbol per line; `#` comments and blanks ignored) — it is
+forwarded to both passes:
+
+```bash
+bash run_filtering.sh my_genes.txt        # full pipeline with the custom list
+perl filtering_r.pl  my_genes.txt         # filtering only
+```
+
+- The file may be **plain symbols** (Association/MOI/GDV columns are filled with `NA`) or the
+  full 4-column g4e format (`gene⇥Association⇥MOI⇥GDV`, in which case those values are used).
+- With `MOI = NA`, genes are treated as **dominant** for the rarity gate (`$FREQ_AD` = 0.01%).
+  If a custom gene has recessive forms, supply its MOI (column 3 = `AR`) to get the
+  recessive threshold, or relax `$FREQ_AD`.
+- Outputs are **namespaced by panel** (`<proband>.<panel>.candidatos`, where `<panel>` is the
+  panel-file basename, e.g. `EPIC280.g4e-2025.candidatos` vs `EPIC280.Hyperparathyroidism.candidatos`),
+  so different gene lists produce **side-by-side** results instead of overwriting. Pangolin score
+  caches are namespaced the same way and recomputed only when the candidate set changes (tracked
+  by an input-CSV checksum).
+
+### Forcing a proband
+
+By default the proband is auto-detected from filenames (a sample ending in `M`/`F` is locked
+in as a parent and never analyzed on its own). To analyze a specific sample — e.g. the
+mother — override it:
+
+```bash
+PROBAND="EPIC280M" bash run_filtering.sh              # analyze the mother
+PROBAND="EPIC280 EPIC280M" bash run_filtering.sh      # analyze both
+perl filtering_r.pl --proband EPIC280M               # filtering only
+```
+
+The forced sample must have a `<name>.germline.vep.vcf.gz`. Its parents are still derived by
+name (`<name>M` / `<name>F`); if they are absent (as for a mother whose own parents aren't in
+the dataset) the sample is analyzed as a **singleton** — `inheritance = NA`, no compound-het
+*trans* phasing (HOM and `CompHet?` flags still apply from the sample's own genotypes). Each
+proband writes its own `<name>.<panel>.candidatos`, so forcing one does not overwrite another.
 
 ### Configuration (env overrides for `run_filtering.sh`)
 

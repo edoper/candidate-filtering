@@ -11,9 +11,19 @@
 #            scores (pangolin_score column + splice rescue at >= 0.5).
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
-# Run from the directory that holds the *.germline.vep.vcf.gz data + reference
-# files (defaults to this script's own directory; override with arg $1).
-cd "${1:-$(dirname "$(readlink -f "$0")")}"
+# Optional arg $1 = genes-of-interest file (one symbol per line) forwarded to
+# filtering_r.pl; if omitted the default panel (g4e-2025.txt) is used.
+# Working directory holds the *.germline.vep.vcf.gz data + reference files
+# (defaults to this script's own directory; override with $WORKDIR).
+GENES="${1:-}"
+cd "${WORKDIR:-$(dirname "$(readlink -f "$0")")}"
+
+# Optional: force specific sample(s) as proband, overriding filename-based
+# auto-discovery.  e.g.  PROBAND="EPIC280M" bash run_filtering.sh
+#                        PROBAND="EPIC280 EPIC280M" bash run_filtering.sh genes.txt
+PROBAND_ARGS=()
+for _p in ${PROBAND:-}; do PROBAND_ARGS+=(--proband "$_p"); done
+FWD=("${PROBAND_ARGS[@]+"${PROBAND_ARGS[@]}"}" ${GENES:+"$GENES"})
 
 # Configurable environment (defaults match the original setup).
 source "${CONDA_BASE:-$HOME/miniconda3}/etc/profile.d/conda.sh"
@@ -23,21 +33,28 @@ FA="${PANGOLIN_FASTA:-$HOME/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa}
 DB="${PANGOLIN_DB:-$HOME/vep_refs/pangolin/gencode.v38.annotation.db}"
 
 echo "===== Pass 1: emit Pangolin candidate inputs ====="
-perl filtering_r.pl
+perl filtering_r.pl "${FWD[@]}"
 
 echo "===== Pangolin scoring ====="
 shopt -s nullglob
 for csv in *.pangolin_input.csv; do
     proband="${csv%.pangolin_input.csv}"
     tsv="$proband.pangolin.tsv"
-    [ -e "$tsv" ] && { echo "[skip] $tsv exists"; continue; }
+    stamp="$proband.pangolin.md5"
+    sum=$(md5sum "$csv" | awk '{print $1}')
+    # Recompute only when the candidate set changed (gene list / thresholds /
+    # annotation), tracked by the input-CSV checksum.
+    if [ -e "$tsv" ] && [ -e "$stamp" ] && [ "$sum" = "$(cat "$stamp")" ]; then
+        echo "[skip] $tsv up-to-date for current candidate set"; continue
+    fi
     echo "[pangolin] scoring $proband ($(($(wc -l < "$csv") - 1)) variants) ..."
     pangolin "$csv" "$FA" "$DB" "$proband.pangolin" -c CHROM,POS,REF,ALT
     perl parse_pangolin.pl "$proband.pangolin.csv" > "$tsv"
+    echo "$sum" > "$stamp"
     echo "[pangolin] -> $tsv ($(wc -l < "$tsv") variants scored)"
 done
 
 echo "===== Pass 2: final filtering with splice scores ====="
-perl filtering_r.pl
+perl filtering_r.pl "${FWD[@]}"
 
 echo "===== done ====="
