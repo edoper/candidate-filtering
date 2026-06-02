@@ -130,11 +130,16 @@ acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
 
 ### Automated ACMG/AMP classification & QC flags
 
-- **`acmg_class` / `acmg_criteria`** — an InterVar-style **triage** classification per variant
-  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting) from the criteria
-  derivable here — PVS1 (LoF), PM2/PM4, PP3 (≥2 strong predictors), PP5 (ClinVar P/LP), and
-  BA1/BS1/BS2/BP4/BP6/BP7 — combined per the ACMG 2015 rules. **Not a final clinical call**: PS/PM1/
-  PM5/PP2 aren't assessed, PVS1 doesn't verify gene mechanism/NMD, PM2 is treated as moderate.
+- **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
+  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign), combined on the
+  **Tavtigian/ClinGen points scale** (Pathogenic ≥10, LP 6–9, VUS 0–5, LB −1..−6, Benign ≤−7;
+  BA1 ⇒ Benign standalone; conflicting evidence nets out). Criteria: PVS1 (+8), PS2 (+4),
+  PM4/PM6 (+2), PM2_supporting (+1), PP5 (+1); **PP3/BP4 from a single calibrated predictor** —
+  **AlphaMissense** primary ([Bergquist 2025](https://doi.org/10.1016/j.gim.2025.101402): PP3 mod ≥0.906 /
+  strong ≥0.990; BP4 mod ≤0.099), **REVEL** fallback ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013):
+  PP3 mod ≥0.773 / strong ≥0.932; BP4 mod ≤0.183 / strong ≤0.016) — with a REVEL direction-conflict
+  veto; BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB), BP7. **Not a final clinical call**: PS1/PM1/PM5/PP2
+  not assessed; PVS1 doesn't verify mechanism/NMD; on points a lone PVS1 ⇒ Likely_pathogenic.
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
   `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`.

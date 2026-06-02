@@ -39,9 +39,12 @@ use Data::Dumper;
 #    predictors (AM>=0.906, CADD>=28.1, EVE path, REVEL>=0.773); AR genes report
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
-#  * Automated ACMG/AMP classification (InterVar-style, TRIAGE ONLY): per-row
-#    acmg_class + acmg_criteria from the derivable subset (PVS1 via LoF, PM2/PM4,
-#    PP3/PP5, BA1/BS1/BS2/BP4/BP6/BP7), combined per ACMG 2015 rules.       [#2]
+#  * Automated ACMG/AMP classification (TRIAGE ONLY): per-row acmg_class +
+#    acmg_criteria, combined on the Tavtigian/ClinGen POINTS framework. PP3/BP4
+#    use a single CALIBRATED tool — AlphaMissense primary (Bergquist 2025),
+#    REVEL fallback (Pejaver 2022) — graded Moderate/Strong, with a REVEL
+#    direction-conflict veto. Other criteria: PVS1, PS2/PM6, PM2(supp)/PM4, PP5,
+#    BA1/BS1/BS2/BP6/BP7. NB: on points, a lone PVS1 (+8) -> Likely_pathogenic. [#2]
 #  * QC / artifact flags (qc_flag): lowDP, lowGQ, AB_het/AB_hom, homopolymer
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
@@ -61,8 +64,9 @@ use Data::Dumper;
 my $INPUT_GLOB = '*.germline.vep.vcf.gz';
 my $FREQ_AD    = 0.01;   # max gnomAD AF (%) for dominant genes  (1 in 10,000)
 my $FREQ_AR    = 1.0;    # max gnomAD AF (%) for recessive genes (carrier freq)
-my $CADD_MIN   = 22;     # CADD PHRED rescue threshold
-my $REVEL_MIN  = 0.5;    # REVEL rescue threshold (permissive; ClinGen PP3 ~0.644)
+my $CADD_MIN   = 25.3;   # CADD PHRED rescue threshold
+my $REVEL_MIN  = 0.644;  # REVEL rescue threshold (ClinGen PP3)
+my $AM_MIN     = 0.792;  # AlphaMissense pathogenicity rescue threshold
 my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 
 # High-impact loss-of-function consequences (LoF rescue arm; see inclusion gate).
@@ -84,7 +88,7 @@ my $REF_FASTA   = '/home/edo/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa
 my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopolymer check
 
 # ── Automated ACMG/AMP classification (InterVar-style, triage only) [#2] ──
-my $PM2_FREQ    = 0.005;   # gnomAD AF (%) at/below -> PM2 (absent/ultra-rare)
+my $PM2_AC_MAX  = 1;       # gnomAD AC at/below -> PM2 (absent=0 or singleton=1)
 my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare disease)
 my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
 my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
@@ -315,57 +319,71 @@ sub homopolymer_context {
     return $hp_cache{$key} = $hp;
 }
 
-# Automated ACMG/AMP classification (InterVar-style, TRIAGE ONLY — not a final
-# clinical classification). Assigns the subset of criteria derivable from the
-# available annotations and combines them per ACMG 2015 rules. [#2]
+# Calibrated PP3/BP4 thresholds — AlphaMissense (Bergquist et al., GIM 2025) and
+# REVEL (Pejaver et al., AJHG 2022).
+my %AMP = (
+    am_pp3_strong=>0.990, am_pp3_mod=>0.906, am_bp4_mod=>0.099,    # AM (no BP4 strong)
+    rv_pp3_strong=>0.932, rv_pp3_mod=>0.773, rv_bp4_strong=>0.016, rv_bp4_mod=>0.183,
+    rv_pp3_supp =>0.644, rv_bp4_supp=>0.290,                       # REVEL supporting (veto)
+);
+
+# Automated ACMG/AMP classification (TRIAGE ONLY — not a final clinical call).
+# Evidence is weighted on the Tavtigian (2020) point scale and combined per the
+# ClinGen points framework:  Pathogenic >=10, Likely path 6..9, VUS 0..5,
+# Likely benign -1..-6, Benign <=-7 (BA1 -> Benign standalone).
+# Strengths: Very Strong +-8, Strong +-4, Moderate +-2, Supporting +-1. [#2]
 sub acmg_classify {
     my (%v) = @_;
     my (@P,@B);
-    # Pathogenic-leaning
-    push @P, "PVS1" if $v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC");
-    push @P, "PM4"  if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
-    push @P, "PM2"  if $v{freq} <= $PM2_FREQ;
-    # PM6 = ASSUMED de novo (parentage not molecularly confirmed). Only a strict
-    # trio DN (absent in BOTH tested parents) qualifies; duo DN/IF and DN/IM are
-    # ambiguous. Upgrades to PS2 only after confirmed de novo + parentage.
-    push @P, "PM6"  if $v{de_novo};
-    my $ncomp = 0;
-    $ncomp++ if $v{am_score} ne "" && $v{am_score} >= $SF_AM;
-    $ncomp++ if $v{cadd_num} >= $SF_CADD;
-    $ncomp++ if $v{eve_class} =~ /athogenic/;
-    $ncomp++ if $v{revel} ne "" && $v{revel} >= $SF_REVEL;
-    push @P, "PP3"  if $ncomp >= 2;
-    push @P, "PP5"  if clinvar_pathogenic($v{clnsig});
-    # Benign-leaning
-    push @B, "BA1"  if $v{freq} >= $BA1_FREQ;
-    push @B, "BS1"  if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
-    push @B, "BS2"  if $v{nhom} ne "" && $v{nhom} >= $BS2_NHOM;
-    push @B, "BP4"  if $v{revel} ne "" && $v{revel} <= $BP4_REVEL;
-    push @B, "BP6"  if clinvar_benign($v{clnsig});
-    push @B, "BP7"  if $v{consequence} =~ /synonymous_variant/
-                    && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2);
+    my $pts = 0;
 
-    # Combine (PS/PM1/PM5/PP2 not assessed; PM2 treated as moderate).
-    my $pvs = grep { /^PVS/ } @P;
-    my $pm  = grep { /^PM/  } @P;
-    my $pp  = grep { /^PP/  } @P;
-    my $ba  = grep { /^BA/  } @B;
-    my $bs  = grep { /^BS/  } @B;
-    my $bp  = grep { /^BP/  } @B;
+    # ── Pathogenic ──
+    if ($v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC")) { push @P,"PVS1"; $pts += 8; }
+    # De novo (relatedness assumed confirmed): trio DN -> PS2 if GT/DP clean else
+    # PM6; duo DN/IF|DN/IM -> PM6 only when de novo is a known gene mechanism.
+    if ($v{inh} eq "DN") {
+        if ($v{gt_clean}) { push @P,"PS2"; $pts += 4; } else { push @P,"PM6"; $pts += 2; }
+    } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P,"PM6"; $pts += 2; }
+    if ($v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/) { push @P,"PM4"; $pts += 2; }
+    if ($v{ac} ne "" && $v{ac} <= $PM2_AC_MAX) { push @P,"PM2"; $pts += 1; }   # PM2_Supporting
+    if (clinvar_pathogenic($v{clnsig}))        { push @P,"PP5"; $pts += 1; }
 
-    my $path = ($pvs && ($pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2));
-    my $lp   = (($pvs && $pm >= 1) || $pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4));
-    my $ben  = ($ba || $bs >= 2);
-    my $lb   = (($bs >= 1 && $bp >= 1) || $bp >= 2);
+    # ── PP3 / BP4: single calibrated tool (AlphaMissense primary, REVEL fallback),
+    #    graded Moderate/Strong, with a direction-conflict veto from the other tool. ──
+    my ($am,$rv) = ($v{am_score}, $v{revel});
+    my ($pp3,$bp4) = ("","");
+    if ($am ne "") {                              # AlphaMissense primary
+        $pp3 = ($am >= $AMP{am_pp3_strong}) ? "strong" : ($am >= $AMP{am_pp3_mod}) ? "moderate" : "";
+        $bp4 = ($am <= $AMP{am_bp4_mod}) ? "moderate" : "";
+        if ($rv ne "") {                          # REVEL = direction-conflict veto
+            $pp3 = "" if $pp3 && $rv <= $AMP{rv_bp4_supp};   # secondary calls benign
+            $bp4 = "" if $bp4 && $rv >= $AMP{rv_pp3_supp};   # secondary calls pathogenic
+        }
+    } elsif ($rv ne "") {                          # REVEL fallback (AM absent)
+        $pp3 = ($rv >= $AMP{rv_pp3_strong}) ? "strong" : ($rv >= $AMP{rv_pp3_mod}) ? "moderate" : "";
+        $bp4 = ($rv <= $AMP{rv_bp4_strong}) ? "strong" : ($rv <= $AMP{rv_bp4_mod}) ? "moderate" : "";
+    }
+    if    ($pp3 eq "strong")   { push @P,"PP3_Strong";   $pts += 4; }
+    elsif ($pp3 eq "moderate") { push @P,"PP3_Moderate"; $pts += 2; }
 
-    my $pathy = $path || $lp;
-    my $beny  = $ben  || $lb;
-    my $class = ($pathy && $beny)  ? "Conflicting"
-              :  $path             ? "Pathogenic"
-              :  $lp               ? "Likely_pathogenic"
-              :  $ben              ? "Benign"
-              :  $lb               ? "Likely_benign"
-              :                      "VUS";
+    # ── Benign ──
+    my $ba1 = ($v{freq} >= $BA1_FREQ) ? 1 : 0;
+    if ($ba1)                                          { push @B,"BA1"; }             # standalone
+    if ($v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ) { push @B,"BS1"; $pts -= 4; }
+    if ($v{nhom} ne "" && $v{nhom} >= $BS2_NHOM)       { push @B,"BS2"; $pts -= 4; }
+    if    ($bp4 eq "strong")   { push @B,"BP4_Strong";   $pts -= 4; }
+    elsif ($bp4 eq "moderate") { push @B,"BP4_Moderate"; $pts -= 2; }
+    if (clinvar_benign($v{clnsig}))                    { push @B,"BP6"; $pts -= 1; }
+    if ($v{consequence} =~ /synonymous_variant/
+        && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2)) { push @B,"BP7"; $pts -= 1; }
+
+    # ── Classify (Tavtigian points; BA1 -> Benign standalone; conflict nets out) ──
+    my $class = $ba1         ? "Benign"
+              : ($pts >= 10) ? "Pathogenic"
+              : ($pts >=  6) ? "Likely_pathogenic"
+              : ($pts >=  0) ? "VUS"
+              : ($pts >= -6) ? "Likely_benign"
+              :                "Benign";
     return ($class, join(",", @P, @B));
 }
 
@@ -559,7 +577,7 @@ foreach my $proband (@probands) {
             my (@kept, $class, $assoc, $moi, $gdv);
             if ($cand_structural) {
                 push @kept, "CADD"     if $cadd_num >= $CADD_MIN;
-                push @kept, "AM"       if $am_class  =~ /athogenic/;
+                push @kept, "AM"       if $am_score ne "" && $am_score >= $AM_MIN;
                 push @kept, "EVE"      if $eve_class =~ /athogenic/;
                 push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
                 push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
@@ -639,11 +657,13 @@ foreach my $proband (@probands) {
             my $qc_flag = join(";", @qc);
 
             # ── [#2] Automated ACMG/AMP classification (triage) ──
+            my $gt_susp = grep { /^(lowDP|lowGQ|AB_)/ } @qc;   # GT/DP suspicious?
             my ($acmg_class,$acmg_crit) = acmg_classify(
                 consequence=>$consequence, lof_type=>$lof_type, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
-                de_novo=>($inheritance eq "DN"));   # PM6: strict trio DN only [#6]
+                ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
+                de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
