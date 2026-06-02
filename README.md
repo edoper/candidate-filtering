@@ -131,15 +131,16 @@ acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
 ### Automated ACMG/AMP classification & QC flags
 
 - **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
-  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign), combined on the
-  **Tavtigian/ClinGen points scale** (Pathogenic ≥10, LP 6–9, VUS 0–5, LB −1..−6, Benign ≤−7;
-  BA1 ⇒ Benign standalone; conflicting evidence nets out). Criteria: PVS1 (+8), PS2 (+4),
-  PM4/PM6 (+2), PM2_supporting (+1), PP5 (+1); **PP3/BP4 from a single calibrated predictor** —
-  **AlphaMissense** primary ([Bergquist 2025](https://doi.org/10.1016/j.gim.2025.101402): PP3 mod ≥0.906 /
-  strong ≥0.990; BP4 mod ≤0.099), **REVEL** fallback ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013):
-  PP3 mod ≥0.773 / strong ≥0.932; BP4 mod ≤0.183 / strong ≤0.016) — with a REVEL direction-conflict
-  veto; BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB), BP7. **Not a final clinical call**: PS1/PM1/PM5/PP2
-  not assessed; PVS1 doesn't verify mechanism/NMD; on points a lone PVS1 ⇒ Likely_pathogenic.
+  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting), combined per the
+  **categorical ACMG 2015 rules**. Criteria: PVS1 (LoF), PS2 (trio de novo), PM6 (assumed de novo),
+  PM2 (AC≤1), PM4, PP5 (ClinVar P/LP); BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB), BP7. **PP3/BP4 come
+  from a single calibrated predictor**, graded **Supporting/Moderate/Strong**:
+  **AlphaMissense** primary ([Bergquist 2025](https://doi.org/10.1016/j.gim.2025.101402): PP3
+  supp ≥0.792 / mod ≥0.906 / strong ≥0.990; BP4 supp ≤0.169 / mod ≤0.099), **REVEL** fallback
+  ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013): PP3 supp ≥0.644 / mod ≥0.773 /
+  strong ≥0.932; BP4 supp ≤0.290 / mod ≤0.183 / strong ≤0.016) — with a **REVEL direction-conflict
+  veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
+  **Not a final clinical call**: PS1/PM1/PM5/PP2 not assessed; PVS1 doesn't verify gene mechanism/NMD.
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
   `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`.

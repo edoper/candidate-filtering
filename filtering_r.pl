@@ -40,11 +40,12 @@ use Data::Dumper;
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
 #  * Automated ACMG/AMP classification (TRIAGE ONLY): per-row acmg_class +
-#    acmg_criteria, combined on the Tavtigian/ClinGen POINTS framework. PP3/BP4
-#    use a single CALIBRATED tool — AlphaMissense primary (Bergquist 2025),
-#    REVEL fallback (Pejaver 2022) — graded Moderate/Strong, with a REVEL
-#    direction-conflict veto. Other criteria: PVS1, PS2/PM6, PM2(supp)/PM4, PP5,
-#    BA1/BS1/BS2/BP6/BP7. NB: on points, a lone PVS1 (+8) -> Likely_pathogenic. [#2]
+#    acmg_criteria, combined per the categorical ACMG 2015 rules. PP3/BP4 use a
+#    single CALIBRATED tool — AlphaMissense primary (Bergquist 2025), REVEL
+#    fallback (Pejaver 2022) — graded Supporting/Moderate/Strong with a REVEL
+#    direction-conflict veto, mapped to the 2015 strength tiers (BP4_Moderate ->
+#    supporting-benign, as 2015 has no benign-Moderate). Other criteria: PVS1,
+#    PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.                            [#2]
 #  * QC / artifact flags (qc_flag): lowDP, lowGQ, AB_het/AB_hom, homopolymer
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
@@ -322,68 +323,99 @@ sub homopolymer_context {
 # Calibrated PP3/BP4 thresholds — AlphaMissense (Bergquist et al., GIM 2025) and
 # REVEL (Pejaver et al., AJHG 2022).
 my %AMP = (
-    am_pp3_strong=>0.990, am_pp3_mod=>0.906, am_bp4_mod=>0.099,    # AM (no BP4 strong)
-    rv_pp3_strong=>0.932, rv_pp3_mod=>0.773, rv_bp4_strong=>0.016, rv_bp4_mod=>0.183,
-    rv_pp3_supp =>0.644, rv_bp4_supp=>0.290,                       # REVEL supporting (veto)
+    am_pp3_strong=>0.990, am_pp3_mod=>0.906, am_pp3_supp=>0.792,   # AM PP3 (no BP4 strong)
+    am_bp4_mod  =>0.099, am_bp4_supp=>0.169,                       # AM BP4
+    rv_pp3_strong=>0.932, rv_pp3_mod=>0.773, rv_pp3_supp=>0.644,   # REVEL PP3
+    rv_bp4_strong=>0.016, rv_bp4_mod=>0.183, rv_bp4_supp=>0.290,   # REVEL BP4
 );
 
 # Automated ACMG/AMP classification (TRIAGE ONLY — not a final clinical call).
-# Evidence is weighted on the Tavtigian (2020) point scale and combined per the
-# ClinGen points framework:  Pathogenic >=10, Likely path 6..9, VUS 0..5,
-# Likely benign -1..-6, Benign <=-7 (BA1 -> Benign standalone).
-# Strengths: Very Strong +-8, Strong +-4, Moderate +-2, Supporting +-1. [#2]
+# Criteria are combined per the categorical ACMG 2015 rules. PP3/BP4 come from a
+# single CALIBRATED tool — AlphaMissense primary, REVEL fallback — graded
+# Supporting/Moderate/Strong with a REVEL direction-conflict veto, then mapped to
+# the 2015 strength tiers (PP3_Strong->strong, _Moderate->moderate, _Supporting->
+# supporting; BP4_Strong->strong-benign, BP4_Moderate/_Supporting->supporting-
+# benign, since the 2015 framework has no benign-Moderate tier). [#2]
 sub acmg_classify {
     my (%v) = @_;
     my (@P,@B);
-    my $pts = 0;
 
-    # ── Pathogenic ──
-    if ($v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC")) { push @P,"PVS1"; $pts += 8; }
-    # De novo (relatedness assumed confirmed): trio DN -> PS2 if GT/DP clean else
-    # PM6; duo DN/IF|DN/IM -> PM6 only when de novo is a known gene mechanism.
-    if ($v{inh} eq "DN") {
-        if ($v{gt_clean}) { push @P,"PS2"; $pts += 4; } else { push @P,"PM6"; $pts += 2; }
-    } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P,"PM6"; $pts += 2; }
-    if ($v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/) { push @P,"PM4"; $pts += 2; }
-    if ($v{ac} ne "" && $v{ac} <= $PM2_AC_MAX) { push @P,"PM2"; $pts += 1; }   # PM2_Supporting
-    if (clinvar_pathogenic($v{clnsig}))        { push @P,"PP5"; $pts += 1; }
+    # Pathogenic criteria
+    push @P, "PVS1" if $v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC");
+    if ($v{inh} eq "DN") {                        # trio de novo (relatedness assumed)
+        push @P, ($v{gt_clean} ? "PS2" : "PM6");
+    } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P, "PM6"; }
+    push @P, "PM4" if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
+    push @P, "PM2" if $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;       # absent or singleton
+    push @P, "PP5" if clinvar_pathogenic($v{clnsig});
 
-    # ── PP3 / BP4: single calibrated tool (AlphaMissense primary, REVEL fallback),
-    #    graded Moderate/Strong, with a direction-conflict veto from the other tool. ──
+    # PP3 / BP4: single calibrated tool (AM primary, REVEL fallback), graded
+    # Supporting/Moderate/Strong, with a REVEL direction-conflict veto.
     my ($am,$rv) = ($v{am_score}, $v{revel});
     my ($pp3,$bp4) = ("","");
     if ($am ne "") {                              # AlphaMissense primary
-        $pp3 = ($am >= $AMP{am_pp3_strong}) ? "strong" : ($am >= $AMP{am_pp3_mod}) ? "moderate" : "";
-        $bp4 = ($am <= $AMP{am_bp4_mod}) ? "moderate" : "";
-        if ($rv ne "") {                          # REVEL = direction-conflict veto
+        $pp3 = ($am >= $AMP{am_pp3_strong}) ? "strong"
+             : ($am >= $AMP{am_pp3_mod})    ? "moderate"
+             : ($am >= $AMP{am_pp3_supp})   ? "supporting" : "";
+        $bp4 = ($am <= $AMP{am_bp4_mod})    ? "moderate"
+             : ($am <= $AMP{am_bp4_supp})   ? "supporting" : "";
+        if ($rv ne "") {                          # REVEL direction-conflict veto
             $pp3 = "" if $pp3 && $rv <= $AMP{rv_bp4_supp};   # secondary calls benign
             $bp4 = "" if $bp4 && $rv >= $AMP{rv_pp3_supp};   # secondary calls pathogenic
         }
     } elsif ($rv ne "") {                          # REVEL fallback (AM absent)
-        $pp3 = ($rv >= $AMP{rv_pp3_strong}) ? "strong" : ($rv >= $AMP{rv_pp3_mod}) ? "moderate" : "";
-        $bp4 = ($rv <= $AMP{rv_bp4_strong}) ? "strong" : ($rv <= $AMP{rv_bp4_mod}) ? "moderate" : "";
+        $pp3 = ($rv >= $AMP{rv_pp3_strong}) ? "strong"
+             : ($rv >= $AMP{rv_pp3_mod})    ? "moderate"
+             : ($rv >= $AMP{rv_pp3_supp})   ? "supporting" : "";
+        $bp4 = ($rv <= $AMP{rv_bp4_strong}) ? "strong"
+             : ($rv <= $AMP{rv_bp4_mod})    ? "moderate"
+             : ($rv <= $AMP{rv_bp4_supp})   ? "supporting" : "";
     }
-    if    ($pp3 eq "strong")   { push @P,"PP3_Strong";   $pts += 4; }
-    elsif ($pp3 eq "moderate") { push @P,"PP3_Moderate"; $pts += 2; }
+    push @P, "PP3_".ucfirst($pp3) if $pp3;
+    push @B, "BP4_".ucfirst($bp4) if $bp4;
 
-    # ── Benign ──
-    my $ba1 = ($v{freq} >= $BA1_FREQ) ? 1 : 0;
-    if ($ba1)                                          { push @B,"BA1"; }             # standalone
-    if ($v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ) { push @B,"BS1"; $pts -= 4; }
-    if ($v{nhom} ne "" && $v{nhom} >= $BS2_NHOM)       { push @B,"BS2"; $pts -= 4; }
-    if    ($bp4 eq "strong")   { push @B,"BP4_Strong";   $pts -= 4; }
-    elsif ($bp4 eq "moderate") { push @B,"BP4_Moderate"; $pts -= 2; }
-    if (clinvar_benign($v{clnsig}))                    { push @B,"BP6"; $pts -= 1; }
-    if ($v{consequence} =~ /synonymous_variant/
-        && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2)) { push @B,"BP7"; $pts -= 1; }
+    # Benign criteria
+    push @B, "BA1" if $v{freq} >= $BA1_FREQ;
+    push @B, "BS1" if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
+    push @B, "BS2" if $v{nhom} ne "" && $v{nhom} >= $BS2_NHOM;
+    push @B, "BP6" if clinvar_benign($v{clnsig});
+    push @B, "BP7" if $v{consequence} =~ /synonymous_variant/
+                   && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2);
 
-    # ── Classify (Tavtigian points; BA1 -> Benign standalone; conflict nets out) ──
-    my $class = $ba1         ? "Benign"
-              : ($pts >= 10) ? "Pathogenic"
-              : ($pts >=  6) ? "Likely_pathogenic"
-              : ($pts >=  0) ? "VUS"
-              : ($pts >= -6) ? "Likely_benign"
-              :                "Benign";
+    # ── Combine per ACMG 2015. Count by strength tier; graded PP3/BP4 contribute
+    #    at their tier (PP3_Strong->PS, _Moderate->PM, _Supporting->PP;
+    #    BP4_Strong->BS, BP4_Moderate/_Supporting->BP). ──
+    my $pvs = grep { $_ eq "PVS1" } @P;
+    my $ps  = grep { $_ eq "PS2"  } @P;
+    my $pm  = grep { /^PM\d/      } @P;            # PM2, PM4, PM6
+    my $pp  = grep { $_ eq "PP5"  } @P;            # PP5
+    $ps++ if $pp3 eq "strong";
+    $pm++ if $pp3 eq "moderate";
+    $pp++ if $pp3 eq "supporting";
+    my $ba  = grep { $_ eq "BA1"  } @B;
+    my $bs  = grep { /^BS\d/      } @B;            # BS1, BS2
+    my $bp  = grep { /^BP[67]/    } @B;            # BP6, BP7
+    $bs++ if $bp4 eq "strong";
+    $bp++ if $bp4 eq "moderate" || $bp4 eq "supporting";
+
+    my $path = ( ($pvs && ($ps >= 1 || $pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2))
+               || $ps >= 2
+               || ($ps >= 1 && ($pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4))) );
+    my $lp   = ( ($pvs && $pm >= 1)
+               || ($ps >= 1 && $pm >= 1)
+               || ($ps >= 1 && $pp >= 2)
+               || $pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4) );
+    my $ben  = ($ba || $bs >= 2);
+    my $lb   = (($bs >= 1 && $bp >= 1) || $bp >= 2);
+
+    my $pathy = $path || $lp;
+    my $beny  = $ben  || $lb;
+    my $class = ($pathy && $beny)  ? "Conflicting"
+              :  $path             ? "Pathogenic"
+              :  $lp               ? "Likely_pathogenic"
+              :  $ben              ? "Benign"
+              :  $lb               ? "Likely_benign"
+              :                      "VUS";
     return ($class, join(",", @P, @B));
 }
 
