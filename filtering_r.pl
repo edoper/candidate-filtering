@@ -3,6 +3,10 @@ use strict;
 use warnings;
 use Data::Dumper;
 
+# Naming / family-discovery self-test (no data or reference files needed).
+#   perl filtering_r.pl --selftest
+run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
+
 #############################################################################
 # filtering_r.pl  —  clinical candidate filtering for trio/duo germline VCFs
 #                    (robust successor of filtering_new.pl / filtering_b3.pl)
@@ -421,27 +425,94 @@ sub acmg_classify {
 
 #############################################################################
 # Discover trios / duos from filenames
+#
+# Role-suffix naming convention (single source of truth — see sample_role):
+#     <FAMILY>-P = proband, <FAMILY>-M = mother, <FAMILY>-F = father.
+# Each role shares the FAMILY prefix, so <FAMILY>-P/-M/-F form one trio. A
+# sample whose name does not end in -P/-M/-F is ignored by auto-discovery (it
+# can still be analyzed via --proband). See run_naming_selftest for examples.
 #############################################################################
+
+# Parse a sample base-name into (role, family). Role is 'P' (proband),
+# 'M' (mother), 'F' (father), or '' for a non-conforming name.
+sub sample_role {
+    my ($s) = @_;
+    return ($2, $1) if defined $s && $s =~ /^(.+)-([PMF])$/;
+    return ("", "");
+}
+
+# Group sample base-names into families by the -P/-M/-F convention. Returns an
+# arrayref of {proband, mother, father} records (mother/father undef if absent),
+# one per family that has a proband, ordered by family name.
+sub discover_families {
+    my %present = map { $_ => 1 } @_;
+    my %fam;
+    for my $s (keys %present) {
+        my ($role, $f) = sample_role($s);
+        $fam{$f}{$role} = $s if $role;
+    }
+    my @recs;
+    for my $f (sort keys %fam) {
+        next unless $fam{$f}{P};
+        push @recs, { proband => $fam{$f}{P}, mother => $fam{$f}{M}, father => $fam{$f}{F} };
+    }
+    return \@recs;
+}
+
+# Self-test of the naming logic above — no VCFs or reference files required.
+sub run_naming_selftest {
+    my @ok;
+    my $is = sub {
+        my ($got, $want, $msg) = @_;
+        my ($g, $w) = (defined $got ? $got : "<undef>", defined $want ? $want : "<undef>");
+        my $pass = ($g eq $w);
+        printf "  [%s] %-26s got=%s want=%s\n", $pass ? "PASS" : "FAIL", $msg, $g, $w;
+        push @ok, $pass;
+    };
+
+    print "naming self-test\n";
+    my @sr;
+    @sr = sample_role("EPID107-P"); $is->("$sr[0]/$sr[1]", "P/EPID107", "sample_role proband");
+    @sr = sample_role("EPID107-M"); $is->("$sr[0]/$sr[1]", "M/EPID107", "sample_role mother");
+    @sr = sample_role("EPID107-F"); $is->("$sr[0]/$sr[1]", "F/EPID107", "sample_role father");
+    @sr = sample_role("EPID107");   $is->("$sr[0]/$sr[1]", "/",         "non-conforming (no role)");
+
+    my $recs = discover_families(qw(
+        EPID107-P EPID107-M EPID107-F   EPIC280-P EPIC280-M   STRAY junk-X
+    ));
+    my %by = map { $_->{proband} => $_ } @$recs;
+    $is->(scalar @$recs,            2,            "two probands discovered");
+    $is->($by{"EPID107-P"}{mother}, "EPID107-M",  "trio mother");
+    $is->($by{"EPID107-P"}{father}, "EPID107-F",  "trio father");
+    $is->($by{"EPIC280-P"}{mother}, "EPIC280-M",  "duo mother");
+    $is->($by{"EPIC280-P"}{father}, undef,        "duo has no father");
+
+    my $fail = grep { !$_ } @ok;
+    print $fail ? "naming self-test: $fail FAILED\n" : "naming self-test: all ".scalar(@ok)." passed\n";
+    exit($fail ? 1 : 0);
+}
 
 my @files = glob $INPUT_GLOB;
 my %file_for;
 for my $f (@files) { (my $s = $f) =~ s/\.germline\.vep\.vcf\.gz$//; $file_for{$s} = $f; }
 
-my %is_parent;
-for my $s (keys %file_for) {
-    $is_parent{$s} = 1 if $s =~ /^(.+)([MF])$/ && exists $file_for{$1};
-}
-
-# Proband list: forced override (--proband) or filename-based auto-discovery.
+# Proband list + parent map: forced override (--proband) or auto-discovery.
 my @probands;
+my %parents_of;        # proband -> {m=>base|undef, f=>base|undef}
 if (@force_probands) {
     for my $p (@force_probands) {
         die "forced proband '$p' has no '$p.germline.vep.vcf.gz' in this directory\n"
             unless exists $file_for{$p};
+        (my $fam = $p) =~ s/-P$//;
+        $parents_of{$p} = { m => (exists $file_for{"$fam-M"} ? "$fam-M" : undef),
+                            f => (exists $file_for{"$fam-F"} ? "$fam-F" : undef) };
     }
     @probands = @force_probands;
 } else {
-    @probands = sort grep { !$is_parent{$_} } keys %file_for;
+    for my $r (@{ discover_families(keys %file_for) }) {
+        push @probands, $r->{proband};
+        $parents_of{$r->{proband}} = { m => $r->{mother}, f => $r->{father} };
+    }
 }
 
 print "muestras encontradas: ", join(", ", sort keys %file_for), "\n";
@@ -465,8 +536,10 @@ my @COLS = qw(
 
 foreach my $proband (@probands) {
     my $pfile = $file_for{$proband};
-    my $mfile = $file_for{$proband."M"};
-    my $ffile = $file_for{$proband."F"};
+    my $mname = $parents_of{$proband}{m};
+    my $fname = $parents_of{$proband}{f};
+    my $mfile = defined $mname ? $file_for{$mname} : undef;
+    my $ffile = defined $fname ? $file_for{$fname} : undef;
     my $have_m = defined $mfile;
     my $have_f = defined $ffile;
 

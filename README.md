@@ -45,12 +45,16 @@ inheritance and recessive context for **downstream manual curation**.
    Pass 2  filtering_r.pl  ──►  <proband>.<panel>.candidatos   (final, curation-ready)
 ```
 
-`filtering_r.pl` auto-discovers families by **filename**: it globs
-`*.germline.vep.vcf.gz`, takes the sample name as the filename minus that suffix, treats a
-sample ending in `M`/`F` as a parent (when the base name also exists), and analyzes the
-rest as probands (`EPIC280` = proband, `EPIC280M` = mother, `EPIC280F` = father). It is a
-two-pass design — if the Pangolin score map is missing it emits the candidate list and
-stops; once scores exist it produces the final table.
+`filtering_r.pl` auto-discovers families by **filename**, using an explicit **role-suffix
+convention**: `<FAMILY>-P` = proband, `<FAMILY>-M` = mother, `<FAMILY>-F` = father (e.g.
+`EPID107-P`, `EPID107-M`, `EPID107-F` form one trio; `EPIC280-P` + `EPIC280-M` a duo). It
+globs `*.germline.vep.vcf.gz`, groups by the shared `<FAMILY>` prefix, analyzes each `-P`
+sample as a proband, and pairs it with its `-M`/`-F` parents. A name not ending in
+`-P`/`-M`/`-F` is ignored by auto-discovery (still usable via `--proband`). The discovery
+logic has a built-in self-test: `perl filtering_r.pl --selftest`.
+
+It is a two-pass design — if the Pangolin score map is missing it emits the candidate list
+and stops; once scores exist it produces the final table.
 
 You can **override** which sample is the proband (see [Forcing a proband](#forcing-a-proband)).
 
@@ -219,13 +223,14 @@ Plus a chr-named GRCh38 primary-assembly FASTA and the GENCODE annotation DB
 ## Usage
 
 ```bash
-# 1) Annotate each family member (proband + parents)
-bash vep_annotate.sh EPIC280.germline.vcf.gz   EPIC280.germline.vep.vcf.gz
-bash vep_annotate.sh EPIC280M.germline.vcf.gz  EPIC280M.germline.vep.vcf.gz
+# 1) Annotate each family member, naming outputs with the role suffix
+#    (-P proband, -M mother, -F father)
+bash vep_annotate.sh EPIC280.raw.vcf.gz    EPIC280-P.germline.vep.vcf.gz
+bash vep_annotate.sh EPIC280M.raw.vcf.gz   EPIC280-M.germline.vep.vcf.gz
 
 # 2) Run the full filtering pipeline (emit → Pangolin → final)
 bash run_filtering.sh
-#    → EPIC280.g4e-2025.candidatos
+#    → EPIC280-P.g4e-2025.candidatos
 ```
 
 ### Custom gene list (genes of interest)
@@ -245,25 +250,25 @@ perl filtering_r.pl  my_genes.txt         # filtering only
   If a custom gene has recessive forms, supply its MOI (column 3 = `AR`) to get the
   recessive threshold, or relax `$FREQ_AD`.
 - Outputs are **namespaced by panel** (`<proband>.<panel>.candidatos`, where `<panel>` is the
-  panel-file basename, e.g. `EPIC280.g4e-2025.candidatos` vs `EPIC280.Hyperparathyroidism.candidatos`),
+  panel-file basename, e.g. `EPIC280-P.g4e-2025.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
   so different gene lists produce **side-by-side** results instead of overwriting. Pangolin score
   caches are namespaced the same way and recomputed only when the candidate set changes (tracked
   by an input-CSV checksum).
 
 ### Forcing a proband
 
-By default the proband is auto-detected from filenames (a sample ending in `M`/`F` is locked
-in as a parent and never analyzed on its own). To analyze a specific sample — e.g. the
-mother — override it:
+By default the proband is auto-detected from filenames (only `-P` samples are analyzed; `-M`/`-F`
+are locked in as parents). To analyze a specific sample — e.g. the mother — override it by its
+full base-name:
 
 ```bash
-PROBAND="EPIC280M" bash run_filtering.sh              # analyze the mother
-PROBAND="EPIC280 EPIC280M" bash run_filtering.sh      # analyze both
-perl filtering_r.pl --proband EPIC280M               # filtering only
+PROBAND="EPIC280-M" bash run_filtering.sh             # analyze the mother
+PROBAND="EPIC280-P EPIC280-M" bash run_filtering.sh   # analyze both
+perl filtering_r.pl --proband EPIC280-M              # filtering only
 ```
 
-The forced sample must have a `<name>.germline.vep.vcf.gz`. Its parents are still derived by
-name (`<name>M` / `<name>F`); if they are absent (as for a mother whose own parents aren't in
+The forced sample must have a `<name>.germline.vep.vcf.gz`. Its parents are still derived from
+the family prefix (`<family>-M` / `<family>-F`, stripping a trailing `-P`); if they are absent (as for a mother whose own parents aren't in
 the dataset) the sample is analyzed as a **singleton** — `inheritance = NA`, no compound-het
 *trans* phasing (HOM and `CompHet?` flags still apply from the sample's own genotypes). Each
 proband writes its own `<name>.<panel>.candidatos`, so forcing one does not overwrite another.
