@@ -22,8 +22,8 @@ use Data::Dumper;
 #    unanticipated compound terms are not silently dropped.            [#1]
 #  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
 #    gnomAD AF than dominant genes.                                    [#6]
-#  * Inclusion (rescue) gate (OR): CADD>=22, AlphaMissense path, EVE path,
-#    REVEL>=0.5, Pangolin>=0.5, ClinVar P/LP, LoF (LOFTEE HC or high-impact
+#  * Inclusion (rescue) gate (OR): CADD>=25.3, AlphaMissense>=0.792, EVE path,
+#    REVEL>=0.644, Pangolin>=0.5, ClinVar P/LP, LoF (LOFTEE HC or high-impact
 #    truncating consequence). Each surviving row records which arm(s) fired in
 #    a `kept_by` column.                                          [#4,#8]
 #  * Genotype-aware: proband zygosity / DP / GQ / allele-balance columns from
@@ -449,10 +449,10 @@ print "probandos: ", join(", ", @probands), (@force_probands ? " (forced overrid
 
 # Output column order (single definition, reused for header + rows).
 my @COLS = qw(
-    chr start end ref alt gene strand transcript consequence hgvs.c hgvs.p tpos
+    chr start end ref alt gene strand consequence hgvs
     revel eve_class eve_score cadd am_class am_score pangolin_score
-    clinvar_sig clinvar_stars clinvar_disease
-    loftee loftee_filter loftee_flags
+    clinvar_sig clinvar_disease
+    loftee
     gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
     zygosity GT DP GQ AB
     inheritance recessive_flag kept_by acmg_class acmg_criteria qc_flag
@@ -697,17 +697,28 @@ foreach my $proband (@probands) {
                 ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
 
+            # Combined HGVS: TRANSCRIPT:c.… (p.…)  [protein accession stripped from HGVSp].
+            my $hgvs = $hgvsc;
+            if ($hgvsp ne "") {
+                (my $p = $hgvsp) =~ s/^[^:]*://;     # drop ENSP…: prefix, keep p.…
+                $hgvs = ($hgvs ne "") ? "$hgvs ($p)" : $p if $p ne "";
+            }
+
+            # Recessive carrier (g4e primary AR gene, MOI from panel) — dropped later
+            # unless biallelic (hom or comp-het). Mirrors the ACMG SF AR rule [#6].
+            my $rec_ar = ($class eq "primary" && (($moi // "") =~ /\bAR\b|XLR|recessiv/i)) ? 1 : 0;
+
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
-                class=>$class, sf_ar=>$sf_ar,
+                class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar,
                 data=>{
                     chr=>$chr, start=>$start, end=>$start, ref=>$ref, alt=>$alt,
-                    gene=>$gene, strand=>$strand, transcript=>$transcript,
-                    consequence=>$consequence, 'hgvs.c'=>$hgvsc, 'hgvs.p'=>$hgvsp, tpos=>$tpos,
+                    gene=>$gene, strand=>$strand,
+                    consequence=>$consequence, hgvs=>$hgvs,
                     revel=>$revel, eve_class=>$eve_class, eve_score=>$eve_score, cadd=>$cadd,
                     am_class=>$am_class, am_score=>$am_score, pangolin_score=>$pangolin,
-                    clinvar_sig=>$clnsig, clinvar_stars=>$clnstars, clinvar_disease=>$clndn,
-                    loftee=>$loftee, loftee_filter=>$lof_filt, loftee_flags=>$lof_flag,
+                    clinvar_sig=>$clnsig, clinvar_disease=>$clndn,
+                    loftee=>$loftee,
                     gnomAD_ac=>$g_ac, gnomAD_an=>$g_an, gnomAD_af=>sprintf("%.5f",$freq),
                     gnomAD_nhomalt=>$g_nhom, gnomAD_filter=>$g_filter,
                     zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
@@ -753,9 +764,11 @@ foreach my $proband (@probands) {
         }
         $gene_flag{$g} = $flag;
     }
-    # Recessive ACMG SF genes: report biallelic only (hom or comp-het); drop carriers.
+    # Recessive genes (g4e primary AR + ACMG SF AR): report biallelic only (hom or
+    # comp-het); drop solitary carriers. g4e wants no carriers at all [#6].
     @rows = grep {
-        !( $_->{sf_ar} && !($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/) )
+        my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
+        !( ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic )
     } @rows;
 
     for my $row (@rows) {

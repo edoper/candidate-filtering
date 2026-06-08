@@ -97,10 +97,10 @@ column records which fired.
 
 | Arm | Threshold |
 |-----|-----------|
-| CADD | `$CADD_MIN` = 22 |
-| AlphaMissense pathogenic | `am_class` is (likely_)pathogenic |
+| CADD | `$CADD_MIN` = 25.3 |
+| AlphaMissense | `am_score` ≥ `$AM_MIN` = 0.792 (ClinGen PP3) |
 | EVE pathogenic | `eve_class` is Pathogenic |
-| REVEL | `$REVEL_MIN` = 0.5 *(permissive; ClinGen PP3 ≈ 0.644)* |
+| REVEL | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
 | Pangolin (splice) | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
@@ -115,18 +115,25 @@ All thresholds are single constants at the top of `filtering_r.pl`.
   (father-only); `NA` for a singleton.
 - **`recessive_flag`** per gene: `HOM` (homozygous), `CompHet(trans)` (≥2 het variants
   phaseable to opposite parents — trio only), or `CompHet?` (≥2 het, unphaseable — e.g. duo).
+- **Recessive carrier drop:** in a recessive (AR/XLR) panel gene, a **solitary het** that is
+  not biallelic (neither `HOM` nor comp-het) is **dropped** — g4e reports no carriers. The
+  relaxed `$FREQ_AR` rarity gate is thus only useful for variants that pair into a biallelic
+  genotype. Same rule applies to recessive ACMG SF genes (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
 
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates) and breakdowns by `kept_by` and inheritance.
 
 ### Output columns (`<proband>.<panel>.candidatos`, TSV)
 
-`chr, start, end, ref, alt, gene, strand, transcript, consequence, hgvs.c, hgvs.p, tpos,
+`chr, start, end, ref, alt, gene, strand, consequence, hgvs,
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
-clinvar_sig, clinvar_stars, clinvar_disease, loftee, loftee_filter, loftee_flags,
+clinvar_sig, clinvar_disease, loftee,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
 zygosity, GT, DP, GQ, AB, inheritance, recessive_flag, kept_by,
 acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
+
+`hgvs` combines HGVSc and HGVSp as `TRANSCRIPT:c.… (p.…)` (the `ENSP…:` protein-accession
+prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 
 ### Automated ACMG/AMP classification & QC flags
 
@@ -270,17 +277,19 @@ proband writes its own `<name>.<panel>.candidatos`, so forcing one does not over
 | `PANGOLIN_FASTA` | `$HOME/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa` |
 | `PANGOLIN_DB` | `$HOME/vep_refs/pangolin/gencode.v38.annotation.db` |
 
-Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$SPLICE_MIN`)
-are edited directly in `filtering_r.pl`.
+Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
+`$SPLICE_MIN`) are edited directly in `filtering_r.pl`.
 
 ---
 
 ## Notes & limitations
 
-- `$FREQ_AR` = 1% is deliberately permissive (sensitivity); it can admit variants with
-  many gnomAD homozygotes — the `gnomAD_nhomalt` column surfaces these for quick triage.
-  Tighten if noisy.
-- `REVEL ≥ 0.5` is sensitivity-tuned, below the ClinGen PP3 calibration (~0.644).
+- `$FREQ_AR` = 1% is deliberately permissive (sensitivity), but solitary het carriers in
+  recessive genes are dropped (only biallelic genotypes survive), so the permissive threshold
+  matters only for variants that pair up. `gnomAD_nhomalt` surfaces high-homozygote variants
+  for quick triage. Tighten if noisy.
+- `REVEL ≥ 0.644` matches the ClinGen PP3 calibration. The AlphaMissense rescue uses a
+  *score* threshold (`am_score ≥ 0.792`), not the categorical `am_class`.
 - Compound-het *trans* confirmation needs a full trio; duos report `CompHet?`.
 - De-novo calls rely on parent VCF genotypes; a parental no-call (uncovered site) can
   masquerade as de novo — verify against parental depth before reporting.
