@@ -7,8 +7,12 @@
 #          does not yet have a Pangolin score map.
 #  Pangolin: compute de-novo splice scores on those variants (GPU).
 #  Parse:    build <proband>.pangolin.tsv (chr-pos-ref-alt -> max|delta|).
-#  Pass 2:   filtering_r.pl produces <proband>.germline.candidatos using the
+#  Pass 2:   filtering_r.pl produces <proband>.<panel>.candidatos using the
 #            scores (pangolin_score column + splice rescue at >= 0.5).
+#  Cleanup:  all Pangolin scratch is deleted; only <proband>.<panel>.candidatos
+#            and the annotated VCFs (*.germline.vep.vcf.gz + .tbi + _summary.html)
+#            survive. Pangolin is therefore recomputed every run (cheap — only
+#            the few hundred structural-pass candidates).
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 # Optional arg $1 = genes-of-interest file (one symbol per line) forwarded to
@@ -40,21 +44,19 @@ shopt -s nullglob
 for csv in *.pangolin_input.csv; do
     proband="${csv%.pangolin_input.csv}"
     tsv="$proband.pangolin.tsv"
-    stamp="$proband.pangolin.md5"
-    sum=$(md5sum "$csv" | awk '{print $1}')
-    # Recompute only when the candidate set changed (gene list / thresholds /
-    # annotation), tracked by the input-CSV checksum.
-    if [ -e "$tsv" ] && [ -e "$stamp" ] && [ "$sum" = "$(cat "$stamp")" ]; then
-        echo "[skip] $tsv up-to-date for current candidate set"; continue
-    fi
     echo "[pangolin] scoring $proband ($(($(wc -l < "$csv") - 1)) variants) ..."
     pangolin "$csv" "$FA" "$DB" "$proband.pangolin" -c CHROM,POS,REF,ALT
     perl parse_pangolin.pl "$proband.pangolin.csv" > "$tsv"
-    echo "$sum" > "$stamp"
     echo "[pangolin] -> $tsv ($(wc -l < "$tsv") variants scored)"
 done
 
 echo "===== Pass 2: final filtering with splice scores ====="
 perl filtering_r.pl "${FWD[@]}"
+
+# Keep only the final tables + annotated VCFs; drop all regenerable Pangolin
+# scratch. Runs only on success (set -e aborts earlier), so a failed run leaves
+# intermediates in place for debugging.
+echo "===== Cleanup: removing Pangolin intermediates ====="
+rm -f -- *.pangolin_input.csv *.pangolin.csv *.pangolin.tsv *.pangolin.md5
 
 echo "===== done ====="

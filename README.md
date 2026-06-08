@@ -40,7 +40,7 @@ inheritance and recessive context for **downstream manual curation**.
                                    │
    Pass 1  filtering_r.pl  ──►  <proband>.<panel>.pangolin_input.csv   (structural-pass variants)
                                    │
-   Pangolin (GPU, de novo)  ──►  <proband>.<panel>.pangolin.csv  ──►  <proband>.<panel>.pangolin.tsv
+   Pangolin (GPU, de novo)  ──►  <proband>.<panel>.pangolin.csv  ──►  <proband>.<panel>.pangolin.tsv   (scratch, auto-removed)
                                    │
    Pass 2  filtering_r.pl  ──►  <proband>.<panel>.candidatos   (final, curation-ready)
 ```
@@ -191,9 +191,12 @@ standalone [Pangolin](https://github.com/tkzeng/Pangolin) on GPU and merged by p
 Only the proband's **structural-pass** variants are scored (a few hundred), not the whole
 VCF. `parse_pangolin.pl` reduces each variant to `max(|increase|, |decrease|)`.
 
-> Pangolin scores are cached per panel (`<proband>.<panel>.pangolin.tsv`) and regenerated
-> automatically when the candidate set changes (the input-CSV checksum differs) — e.g. after
-> editing the structural filters, the gene list, or re-annotating.
+> All Pangolin scratch (`*.pangolin_input.csv`, `*.pangolin.csv`, `*.pangolin.tsv`) is
+> **deleted after Pass 2 writes the final table** — the pipeline keeps only
+> `<proband>.<panel>.candidatos` and the annotated VCFs (`*.germline.vep.vcf.gz` + `.tbi` +
+> `_summary.html`). Pangolin is therefore recomputed on every run; it is cheap because only
+> the few hundred structural-pass candidates are scored. (Cleanup runs only on success, so a
+> failed run leaves intermediates in place for debugging.)
 
 ---
 
@@ -251,9 +254,8 @@ perl filtering_r.pl  my_genes.txt         # filtering only
   recessive threshold, or relax `$FREQ_AD`.
 - Outputs are **namespaced by panel** (`<proband>.<panel>.candidatos`, where `<panel>` is the
   panel-file basename, e.g. `EPIC280-P.g4e-2025.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
-  so different gene lists produce **side-by-side** results instead of overwriting. Pangolin score
-  caches are namespaced the same way and recomputed only when the candidate set changes (tracked
-  by an input-CSV checksum).
+  so different gene lists produce **side-by-side** results instead of overwriting. Pangolin
+  scratch is namespaced the same way but deleted after each run (see [Splice scoring](#splice-scoring-pangolin)).
 
 ### Forcing a proband
 
