@@ -170,6 +170,19 @@ if (open my $afh, "<", $ACMG_FILE) {
     warn "WARN: $ACMG_FILE not found — secondary findings (Incidental) disabled\n";
 }
 
+# ── ClinVar amino-acid evidence for PS1/PM5 (optional; graceful if absent) ──
+# Built from the MANE-missense split; override the directory with $CLINVAR_AA_DIR.
+my $CLINVAR_AA_DIR = $ENV{CLINVAR_AA_DIR} // '/home/edo/gbackbone/input-clinvar';
+my $PLP_resid = load_clinvar_aa("$CLINVAR_AA_DIR/clinvar.MANE_missense.PLP.tsv");
+my $BLB_resid = load_clinvar_aa("$CLINVAR_AA_DIR/clinvar.MANE_missense.BLB.tsv");
+my $CLINVAR_AA_ON = (keys %$PLP_resid) ? 1 : 0;
+if ($CLINVAR_AA_ON) {
+    printf "ClinVar AA evidence (PS1/PM5): %d P/LP residues, %d B/LB residues\n",
+        scalar(keys %$PLP_resid), scalar(keys %$BLB_resid);
+} else {
+    warn "WARN: ClinVar missense P/LP resource not found under $CLINVAR_AA_DIR — PS1/PM5 disabled\n";
+}
+
 #############################################################################
 # Helpers
 #############################################################################
@@ -297,15 +310,45 @@ sub clinvar_benign {
     return 0 unless defined $s && $s ne "";
     return ($s =~ /benign/i && $s !~ /pathogenic/i) ? 1 : 0;
 }
-# ClinVar review status (CLNREVSTAT) -> star count (0-4).
+# ClinVar review status -> star count (0-4). Handles both the VEP CLNREVSTAT
+# underscore form ("criteria_provided,_single_submitter") and the ClinVar TSV
+# space form ("criteria provided, single submitter"). The "no assertion criteria
+# provided" string contains "criteria provided" — guarded explicitly to 0 stars.
 sub clinvar_stars {
     my ($s) = @_;
     return 0 unless defined $s && $s ne "";
-    return 4 if $s =~ /practice_guideline/i;
-    return 3 if $s =~ /expert_panel/i;
-    return 2 if $s =~ /multiple_submitters/i;
-    return 1 if $s =~ /single_submitter|criteria_provided/i;
+    my $t = lc $s; $t =~ tr/_/ /;
+    return 4 if $t =~ /practice guideline/;
+    return 3 if $t =~ /expert panel/;
+    return 2 if $t =~ /multiple submitter/;
+    return 0 if $t =~ /no assertion|no classification|no interpretation/;
+    return 1 if $t =~ /single submitter|conflicting|criteria provided/;
     return 0;
+}
+
+# ClinVar amino-acid-level evidence for PS1/PM5, built from the MANE-missense
+# split (clinvar.MANE_missense.{PLP,BLB}.tsv). Returns a hashref keyed by
+# "GENE\tAApos\tRefAA" -> { AltAA => max_stars }, so a candidate's residue can be
+# checked for the SAME change (PS1) or a DIFFERENT pathogenic change (PM5).
+sub load_clinvar_aa {
+    my ($file) = @_;
+    my %resid;
+    return \%resid unless defined $file && -e $file;
+    open(my $fh, "<", $file) or do { warn "WARN: cannot read $file: $!\n"; return \%resid; };
+    <$fh>;   # header
+    while (my $l = <$fh>) {
+        chomp $l;
+        my @f = split /\t/, $l;
+        # 1-based cols: 8 GeneSymbol, 11 ReviewStatus, 23 BB_AApos, 24 BB_RefAA, 28 AltAA
+        my ($gene,$rev,$aapos,$refAA,$altAA) = @f[7,10,22,23,27];
+        next unless defined $gene && defined $aapos && defined $refAA && defined $altAA;
+        next if $gene eq "" || $aapos eq "" || $refAA eq "" || $altAA eq "" || $refAA eq $altAA;
+        my $st = clinvar_stars($rev);
+        my $k  = "$gene\t$aapos\t$refAA";
+        $resid{$k}{$altAA} = $st if !exists $resid{$k}{$altAA} || $st > $resid{$k}{$altAA};
+    }
+    close $fh;
+    return \%resid;
 }
 
 # Is an INDEL in/adjacent to a homopolymer run (>=5)? Error-prone context. [#7]
@@ -352,6 +395,9 @@ sub acmg_classify {
     push @P, "PM4" if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
     push @P, "PM2" if $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;       # absent or singleton
     push @P, "PP5" if clinvar_pathogenic($v{clnsig});
+    # PS1 (same AA change P/LP) or PM5 (different change, same residue P/LP), from
+    # the ClinVar AA resource; conflicting matches are tagged but still counted (triage).
+    push @P, $v{aa_crit} . ($v{aa_conflict} ? "(conflicting)" : "") if $v{aa_crit};
 
     # PP3 / BP4: single calibrated tool (AM primary, REVEL fallback), graded
     # Supporting/Moderate/Strong, with a REVEL direction-conflict veto.
@@ -382,7 +428,7 @@ sub acmg_classify {
     push @B, "BA1" if $v{freq} >= $BA1_FREQ;
     push @B, "BS1" if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
     push @B, "BS2" if $v{nhom} ne "" && $v{nhom} >= $BS2_NHOM;
-    push @B, "BP6" if clinvar_benign($v{clnsig});
+    push @B, "BP6" if clinvar_benign($v{clnsig}) && ($v{clnstar} // 0) >= 1;
     push @B, "BP7" if $v{consequence} =~ /synonymous_variant/
                    && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2);
 
@@ -390,8 +436,8 @@ sub acmg_classify {
     #    at their tier (PP3_Strong->PS, _Moderate->PM, _Supporting->PP;
     #    BP4_Strong->BS, BP4_Moderate/_Supporting->BP). ──
     my $pvs = grep { $_ eq "PVS1" } @P;
-    my $ps  = grep { $_ eq "PS2"  } @P;
-    my $pm  = grep { /^PM\d/      } @P;            # PM2, PM4, PM6
+    my $ps  = grep { /^PS\d/      } @P;            # PS1, PS2
+    my $pm  = grep { /^PM\d/      } @P;            # PM2, PM4, PM5, PM6
     my $pp  = grep { $_ eq "PP5"  } @P;            # PP5
     $ps++ if $pp3 eq "strong";
     $pm++ if $pp3 eq "moderate";
@@ -522,10 +568,10 @@ print "probandos: ", join(", ", @probands), (@force_probands ? " (forced overrid
 my @COLS = qw(
     chr start end ref alt gene strand consequence hgvs
     revel eve_class eve_score cadd am_class am_score pangolin_score
-    clinvar_sig clinvar_disease
+    clinvar_sig clinvar_stars clinvar_disease clinvar_aa
     loftee
     gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
-    zygosity GT DP GQ AB
+    zygosity GT DP GQ AB GT_SOURCE NCALLERS CONF
     inheritance recessive_flag kept_by acmg_class acmg_criteria qc_flag
     Association MOI GDV
 );
@@ -564,6 +610,8 @@ foreach my $proband (@probands) {
         hgvsc         => resolve($col,'HGVSc'),
         hgvsp         => resolve($col,'HGVSp'),
         tpos          => resolve($col,'cDNA_position'),
+        aa            => resolve($col,'Amino_acids'),
+        ppos          => resolve($col,'Protein_position'),
         revel         => resolve($col,'REVEL'),
         eve_class     => resolve($col,'EVE_CLASS'),
         eve_score     => resolve($col,'EVE_SCORE'),
@@ -615,6 +663,13 @@ foreach my $proband (@probands) {
         next unless defined $csq;
 
         my $my_id = "$chr-$start-$ref-$alt";
+
+        # Consensus provenance (INFO-level; present only for consensus.sh output —
+        # DRAGEN VCFs lack these, leaving the columns empty). GT_SOURCE flags
+        # genotypes borrowed from a non-DeepVariant caller (which also lack VAF).
+        my ($gtsrc)    = $info =~ /(?:^|;)GT_SOURCE=([^;]*)/; $gtsrc    = defined $gtsrc    ? $gtsrc    : "";
+        my ($ncallers) = $info =~ /(?:^|;)NCALLERS=([^;]*)/;  $ncallers = defined $ncallers ? $ncallers : "";
+        my ($conf)     = $info =~ /(?:^|;)CONF=([^;]*)/;      $conf     = defined $conf     ? $conf     : "";
 
         # Proband genotype (same for all transcripts of this variant) [#5].
         my ($gt,$dp,$gq,$adr,$ada) = parse_call($fmt,$smp);
@@ -674,7 +729,42 @@ foreach my $proband (@probands) {
             my $hgvsc     = field(\@r,$i{hgvsc});
             my $hgvsp     = field(\@r,$i{hgvsp});
             my $tpos      = field(\@r,$i{tpos});
+            my $clnstar_n = clinvar_stars($clnstars);          # exact-variant review stars
             my $pangolin  = exists $pscore->{$my_id} ? $pscore->{$my_id} : "";
+
+            # ── PS1 / PM5 from ClinVar amino-acid evidence (>=1 star) ──
+            # PS1: SAME amino-acid change is P/LP. PM5: a DIFFERENT change at the
+            # same residue is P/LP. Flagged (conflicting) when the matched change
+            # is also reported B/LB. Missense only; needs the AA resource loaded.
+            my ($aa_crit,$aa_detail,$aa_conflict) = ("","",0);
+            my $aa_field = field(\@r,$i{aa});                  # e.g. "R/H"
+            my ($refAA,$altAA) = $aa_field =~ m{^([A-Za-z])/([A-Za-z])$} ? ($1,$2) : ("","");
+            my ($paapos) = (field(\@r,$i{ppos}) =~ /(\d+)/);
+            $paapos = defined $paapos ? $paapos : "";
+            if ($CLINVAR_AA_ON && $gene ne "" && $paapos ne "" && $refAA ne "" && $altAA ne "") {
+                my $k   = "$gene\t$paapos\t$refAA";
+                my $plp = $PLP_resid->{$k};
+                if ($plp) {
+                    if (exists $plp->{$altAA} && $plp->{$altAA} >= 1) {           # PS1
+                        $aa_crit   = "PS1";
+                        $aa_detail = sprintf("PS1:%s p.%s%s%s (%d*)", $gene,$refAA,$paapos,$altAA,$plp->{$altAA});
+                        $aa_conflict = 1 if exists $BLB_resid->{$k}{$altAA};
+                    } else {                                                     # PM5
+                        my ($balt,$bst) = ("",0);
+                        for my $a (keys %$plp) {
+                            next if $a eq $altAA;
+                            ($balt,$bst) = ($a,$plp->{$a}) if $plp->{$a} >= 1 && $plp->{$a} > $bst;
+                        }
+                        if ($balt ne "") {
+                            $aa_crit   = "PM5";
+                            $aa_detail = sprintf("PM5:%s p.%s%s%s [P/LP at residue: p.%s%s%s (%d*)]",
+                                                 $gene,$refAA,$paapos,$altAA, $refAA,$paapos,$balt,$bst);
+                            $aa_conflict = 1 if exists $BLB_resid->{$k}{$balt};
+                        }
+                    }
+                    $aa_detail .= " |conflicting" if $aa_crit && $aa_conflict;
+                }
+            }
             my $cadd_num  = ($cadd eq "") ? 0 : $cadd;
             my $lof_type  = grep { $LOF_CONS{$_} } split /&/, $consequence;
 
@@ -757,6 +847,7 @@ foreach my $proband (@probands) {
                 push @qc, "AB_hom" if $zyg eq "hom" && $ab < 0.85;
             }
             push @qc, "homopolymer"   if homopolymer_context($chr,$start,$ref,$alt);
+            push @qc, "GT_rescued"    if $gtsrc ne "" && $gtsrc ne "deepvariant";  # borrowed (non-DV) genotype, no VAF
             push @qc, "inh_lowqual"   if $inh_lowqual;
             push @qc, "DN_unconfirmed" if $inheritance =~ /^DN/;   # no parental ref depth
             my $qc_flag = join(";", @qc);
@@ -768,6 +859,7 @@ foreach my $proband (@probands) {
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
                 ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
+                aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, BP6 star-gate
                 de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
 
             # Combined HGVS: TRANSCRIPT:c.… (p.…)  [protein accession stripped from HGVSp].
@@ -790,11 +882,13 @@ foreach my $proband (@probands) {
                     consequence=>$consequence, hgvs=>$hgvs,
                     revel=>$revel, eve_class=>$eve_class, eve_score=>$eve_score, cadd=>$cadd,
                     am_class=>$am_class, am_score=>$am_score, pangolin_score=>$pangolin,
-                    clinvar_sig=>$clnsig, clinvar_disease=>$clndn,
+                    clinvar_sig=>$clnsig, clinvar_stars=>$clnstar_n,
+                    clinvar_disease=>$clndn, clinvar_aa=>$aa_detail,
                     loftee=>$loftee,
                     gnomAD_ac=>$g_ac, gnomAD_an=>$g_an, gnomAD_af=>sprintf("%.5f",$freq),
                     gnomAD_nhomalt=>$g_nhom, gnomAD_filter=>$g_filter,
                     zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
+                    GT_SOURCE=>$gtsrc, NCALLERS=>$ncallers, CONF=>$conf,
                     inheritance=>$inheritance, recessive_flag=>"", kept_by=>$kept_by,
                     acmg_class=>$acmg_class, acmg_criteria=>$acmg_crit, qc_flag=>$qc_flag,
                     Association=>($assoc//""), MOI=>$moi, GDV=>($gdv//""),

@@ -131,29 +131,45 @@ A per-proband **run summary** prints counts (read / multiallelic-skipped / struc
 
 `chr, start, end, ref, alt, gene, strand, consequence, hgvs,
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
-clinvar_sig, clinvar_disease, loftee,
+clinvar_sig, clinvar_stars, clinvar_disease, clinvar_aa, loftee,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
-zygosity, GT, DP, GQ, AB, inheritance, recessive_flag, kept_by,
+zygosity, GT, DP, GQ, AB, GT_SOURCE, NCALLERS, CONF,
+inheritance, recessive_flag, kept_by,
 acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
 
 `hgvs` combines HGVSc and HGVSp as `TRANSCRIPT:c.… (p.…)` (the `ENSP…:` protein-accession
 prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 
+- **`clinvar_stars`** — review-status stars (0–4) of the exact variant's ClinVar classification.
+- **`clinvar_aa`** — the PS1/PM5 amino-acid evidence string (see below), e.g.
+  `PS1:BRCA1 p.R1699W (3*)` or `PM5:… [P/LP at residue: …] |conflicting`; empty if none.
+- **`GT_SOURCE` / `NCALLERS` / `CONF`** — consensus provenance, populated only when the input
+  came from `consensus.sh` (the Sarek union consensus); empty for single-source (e.g. DRAGEN) VCFs.
+  `GT_SOURCE` names the caller the genotype was taken from (`deepvariant`, `strelka`,
+  `haplotypecaller`); a non-DeepVariant value also means **no `VAF`** (allele balance is computed
+  from `AD`) and raises a `GT_rescued` QC flag.
+
 ### Automated ACMG/AMP classification & QC flags
 
 - **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
   (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting), combined per the
-  **categorical ACMG 2015 rules**. Criteria: PVS1 (LoF), PS2 (trio de novo), PM6 (assumed de novo),
-  PM2 (AC≤1), PM4, PP5 (ClinVar P/LP); BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB), BP7. **PP3/BP4 come
-  from a single calibrated predictor**, graded **Supporting/Moderate/Strong**:
+  **categorical ACMG 2015 rules**. Criteria: PVS1 (LoF), PS1 (same AA change is ClinVar P/LP),
+  PS2 (trio de novo), PM5 (different change, same residue, is ClinVar P/LP), PM6 (assumed de novo),
+  PM2 (AC≤1), PM4, PP5 (ClinVar P/LP for this variant); BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB, ≥1★), BP7.
+  **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
+  gene + protein residue + amino-acid change, requiring **≥1 review star**; a match also reported B/LB is
+  tagged **`(conflicting)`** (still counted — flag for manual review) and detailed in the `clinvar_aa` column.
+  **PP3/BP4 come from a single calibrated predictor**, graded **Supporting/Moderate/Strong**:
   **AlphaMissense** primary ([Bergquist 2025](https://doi.org/10.1016/j.gim.2025.101402): PP3
   supp ≥0.792 / mod ≥0.906 / strong ≥0.990; BP4 supp ≤0.169 / mod ≤0.099), **REVEL** fallback
   ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013): PP3 supp ≥0.644 / mod ≥0.773 /
   strong ≥0.932; BP4 supp ≤0.290 / mod ≤0.183 / strong ≤0.016) — with a **REVEL direction-conflict
   veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
-  **Not a final clinical call**: PS1/PM1/PM5/PP2 not assessed; PVS1 doesn't verify gene mechanism/NMD.
+  **Not a final clinical call**: PM1/PP2 not assessed; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5
+  rely on ClinVar AA matching (no independent re-curation, and PS1 may overlap PP5 for the same variant).
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
   `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
+  `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`.
 - **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
   sites), so de-novo cannot be confirmed from parental coverage — `DN` rows are flagged
@@ -219,7 +235,15 @@ pip install git+https://github.com/tkzeng/Pangolin.git
 Plus a chr-named GRCh38 primary-assembly FASTA and the GENCODE annotation DB
 (`gencode.v38.annotation.db`) — see `run_filtering.sh` for the expected paths.
 
-**Filtering** needs only system Perl (no modules).
+**Filtering** needs only system Perl (no modules). For **PS1/PM5** it additionally reads the
+ClinVar MANE-missense resource `clinvar.MANE_missense.{PLP,BLB}.tsv` (built by
+`gbackbone/input-clinvar/clinvar_split_mane_missense.sh`). The directory defaults to
+`/home/edo/gbackbone/input-clinvar` and is overridable with the `CLINVAR_AA_DIR` env var; if the
+resource is absent, filtering still runs and PS1/PM5 are simply skipped (logged).
+
+**Input compatibility:** the filter reads both single-source VCFs (e.g. DRAGEN) and the Sarek
+**union-consensus** output of `consensus.sh` — it picks up the `GT_SOURCE`/`NCALLERS`/`CONF` INFO
+tags when present (and flags `GT_rescued` for borrowed, VAF-less genotypes), and ignores them otherwise.
 
 ---
 
