@@ -107,6 +107,7 @@ column records which fired.
 | REVEL | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
 | Pangolin (splice) | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
+| PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. Rescues a missense even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.

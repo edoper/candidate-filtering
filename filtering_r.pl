@@ -778,6 +778,7 @@ foreach my $proband (@probands) {
                 push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
                 push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
                 push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
+                push @kept, $aa_crit   if $aa_crit;   # PS1/PM5 (ClinVar amino-acid evidence)
                 if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
             }
 
