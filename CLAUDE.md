@@ -94,6 +94,26 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   calls the Ensembl REST API** (only the variant string, never patient data; needs `curl`+`jq`) and
   needs `ENST…` ids (the cache is Ensembl, not RefSeq).
 
+## ACMG criteria evaluated (triage-grade)
+
+Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015. Full thresholds
++ PP3/BP4 calibration are in `README.md`.
+
+| Criterion | What triggers it |
+|---|---|
+| **PVS1** | LoF: LOFTEE = HC, or truncating consequence with LOFTEE ≠ LC |
+| **PS1** | Same AA change is ClinVar P/LP (≥1★) |
+| **PS2** / **PM6** | De novo confirmed in trio (PS2) / assumed de novo, unconfirmed or duo (PM6) |
+| **PM2** | Absent or singleton in gnomAD (AC ≤ 1) |
+| **PM4** | Protein length change (in-frame indel / `stop_lost`) |
+| **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
+| **PP3** / **BP4** | Computational, graded Supp/Mod/Strong (AlphaMissense primary, REVEL fallback) |
+| **PP5** / **BP6** | This variant reported P/LP (PP5) or B/LB ≥1★ (BP6) in ClinVar |
+| **BA1** / **BS1** / **BS2** | gnomAD AF ≥ 5% / ≥ 1% / ≥ 10 homozygotes |
+| **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) |
+
+**Not evaluated (manual curation):** PS3/BS3, PS4, PM1, PM3, PP1/BS4, PP2, PP4, BP1/BP2/BP3/BP5.
+
 ## Dependencies
 
 - **Annotation:** Ensembl VEP (offline GRCh38 cache) + LOFTEE/REVEL/AlphaMissense/EVE/CADD

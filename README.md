@@ -154,10 +154,37 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 
 - **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
   (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting), combined per the
-  **categorical ACMG 2015 rules**. Criteria: PVS1 (LoF), PS1 (same AA change is ClinVar P/LP),
-  PS2 (trio de novo), PM5 (different change — or a single-codon in-frame deletion — at a residue
-  with ClinVar P/LP), PM6 (assumed de novo),
-  PM2 (AC≤1), PM4, PP5 (ClinVar P/LP for this variant); BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB, ≥1★), BP7.
+  **categorical ACMG 2015 rules** from the criteria the pipeline evaluates automatically:
+
+  **Pathogenic**
+
+  | Criterion | What triggers it | Source |
+  |---|---|---|
+  | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
+  | **PS1** | Same amino-acid change is ClinVar P/LP (≥1★) | ClinVar MANE-missense |
+  | **PS2** | De novo **confirmed** in a trio (`inheritance=DN`, clean genotype) | parental GT |
+  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) | gnomAD v4.1 |
+  | **PM4** | Protein length change (in-frame indel / `stop_lost`) | consequence |
+  | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
+  | **PM6** | **Assumed** de novo (DN unconfirmed / duo) | parental GT |
+  | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below) | AlphaMissense / REVEL |
+  | **PP5** | This variant is reported pathogenic in ClinVar | ClinVar |
+
+  **Benign**
+
+  | Criterion | What triggers it | Source |
+  |---|---|---|
+  | **BA1** | gnomAD AF ≥ 5% | gnomAD v4.1 |
+  | **BS1** | gnomAD AF ≥ 1% (and < 5%) | gnomAD v4.1 |
+  | **BS2** | ≥ 10 homozygotes in gnomAD | gnomAD v4.1 |
+  | **BP4** | Computational benign, graded (see below) | AlphaMissense / REVEL |
+  | **BP6** | This variant is reported benign in ClinVar (≥1★) | ClinVar |
+  | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) | Pangolin |
+
+  **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control), PM1
+  (hotspot/domain), PM3 (in trans), PP1/BS4 (segregation), PP2 (missense-constrained gene),
+  PP4 (phenotype specificity), BP1/BP2/BP3/BP5.
+
   **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
   gene + protein residue + amino-acid change, requiring **≥1 review star**; a match also reported B/LB is
   tagged **`(conflicting)`** (still counted — flag for manual review) and detailed in the `clinvar_aa` column.
