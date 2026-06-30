@@ -17,7 +17,7 @@ inheritance and recessive context for **downstream manual curation**.
 | File | Purpose |
 |------|---------|
 | `vep_annotate.sh` | Annotate a germline VCF with Ensembl VEP (plugins + custom gnomAD & ClinVar), splitting multiallelics first. Produces `*.germline.vep.vcf.gz`. |
-| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. |
+| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. Also the **single-variant consult** entry point (`-v`/`-l`): annotate one or a few variants (coords or HGVS) from scratch and report everything, gates bypassed. |
 | `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.<panel>.pangolin.tsv`). |
 | `run_filtering.sh` | End-to-end driver: emit candidates → score with Pangolin → final filtering. |
 | `g4e-2025.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. |
@@ -107,7 +107,7 @@ column records which fired.
 | REVEL | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
 | Pangolin (splice) | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
-| PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. Rescues a missense even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
+| PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
@@ -155,7 +155,8 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 - **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
   (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting), combined per the
   **categorical ACMG 2015 rules**. Criteria: PVS1 (LoF), PS1 (same AA change is ClinVar P/LP),
-  PS2 (trio de novo), PM5 (different change, same residue, is ClinVar P/LP), PM6 (assumed de novo),
+  PS2 (trio de novo), PM5 (different change — or a single-codon in-frame deletion — at a residue
+  with ClinVar P/LP), PM6 (assumed de novo),
   PM2 (AC≤1), PM4, PP5 (ClinVar P/LP for this variant); BA1/BS1/BS2 (freq), BP6 (ClinVar B/LB, ≥1★), BP7.
   **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
   gene + protein residue + amino-acid change, requiring **≥1 review star**; a match also reported B/LB is
@@ -264,12 +265,12 @@ bash run_filtering.sh
 ### Custom gene list (genes of interest)
 
 By default the panel is `g4e-2025.txt`. To restrict to a different gene set, pass a
-genes-of-interest file (one gene symbol per line; `#` comments and blanks ignored) — it is
-forwarded to both passes:
+genes-of-interest file (one gene symbol per line; `#` comments and blanks ignored) with
+`-l`/`--list` — it is forwarded to both passes:
 
 ```bash
 bash run_filtering.sh my_genes.txt        # full pipeline with the custom list
-perl filtering_r.pl  my_genes.txt         # filtering only
+perl filtering_r.pl -l my_genes.txt       # filtering only
 ```
 
 - The file may be **plain symbols** (Association/MOI/GDV columns are filled with `NA`) or the
@@ -281,6 +282,49 @@ perl filtering_r.pl  my_genes.txt         # filtering only
   panel-file basename, e.g. `EPIC280-P.g4e-2025.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
   so different gene lists produce **side-by-side** results instead of overwriting. Pangolin
   scratch is namespaced the same way but deleted after each run (see [Splice scoring](#splice-scoring-pangolin)).
+
+### Single-variant lookup (`filtering_r.pl -v` / `-l`)
+
+To **consult one (or a few) variants** and see *everything the pipeline can say about each* —
+every predictor, ClinVar, gnomAD, PS1/PM5, the triage ACMG class, QC flags — in the **same
+`.candidatos` format**, without any panel / rarity / consequence / evidence gating:
+
+```bash
+# GRCh38 genomic coordinates (100% offline) — chr-pos-ref-alt, or :/space separated
+perl filtering_r.pl -v 'chr17-7675088-C-T'
+perl filtering_r.pl -v '2:166073617:T:G'
+
+# HGVS on an Ensembl transcript (resolved to coordinates via the Ensembl REST API)
+perl filtering_r.pl -v 'ENST00000269305.9:c.524G>A'
+
+# several at once: repeat -v
+perl filtering_r.pl -v 'chr17-7675088-C-T' -v 'ENST00000269305.9:c.524G>A'
+
+# options
+perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt     # custom candidate-gene panel
+perl filtering_r.pl -v 'chr17-7675088-C-T' --all-transcripts   # report every transcript, not just MANE
+perl filtering_r.pl -v 'chr17-7675088-C-T' --keep-vcf          # keep the annotated VCF
+```
+
+Output: `lookup.<tag>.<panel>.candidatos` — `<tag>` is the variant id (`chr-pos-ref-alt`) for a
+single `-v`, else `<first-id>+<N>`. (A pre-annotated VCF can still be analyzed directly with
+`--lookup <file.germline.vep.vcf.gz>`.)
+
+- The variant(s) are built **sites-only** (no sample), so genotype columns (zygosity/GT/DP/GQ/AB)
+  are blank and `inheritance = NA`; every annotation-derived field is still computed.
+- **MANE-only** by default (use `--all-transcripts` to see all transcripts). A variant with no
+  MANE annotation yields an empty table; re-run with `--all-transcripts`.
+- `kept_by` lists whichever evidence arms fire (or `none`); off-panel genes get
+  `Association/MOI/GDV = NA`, ACMG-SF genes get their condition + `GDV = Incidental`.
+- **Coordinates resolve 100% offline.** **HGVS** requires transcript→genomic mapping, which VEP
+  cannot do offline, so it is resolved via the **Ensembl REST API** (GRCh38) — only the variant
+  notation is sent (a public variant string, **never patient data**); override the endpoint with
+  `$ENSEMBL_REST`. The local cache is Ensembl (not RefSeq), so use `ENST…` HGVS, not `NM_…`.
+  The HGVS path needs `curl` + `jq`; the coordinate path needs neither.
+- Mechanically: build a sites-only VCF → `vep_annotate.sh` (full annotation) → report-everything
+  lookup mode. Bypasses the two-pass Pangolin bridge, so `pangolin_score` is `NA` (splice is not
+  scored for an ad-hoc variant). The annotated VCF + scratch are removed afterward unless
+  `--keep-vcf`.
 
 ### Forcing a proband
 

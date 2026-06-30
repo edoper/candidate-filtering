@@ -63,6 +63,23 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  stops for that proband. Run Pangolin (run_filtering.sh) to create the .tsv,
 #  then re-run to produce <proband>.<panel>.candidatos.  (<panel> = panel
 #  basename, so different gene lists produce side-by-side outputs.)
+#
+# Single-variant lookup mode
+# --------------------------
+#  Report EVERYTHING for one (or a few) variants in the standard .candidatos
+#  format with the panel / rarity / consequence / rescue gates and the
+#  recessive-carrier drop all BYPASSED (off-panel genes get Association/MOI/GDV =
+#  NA; kept_by lists whichever evidence arms fire, else "none"). MANE-only unless
+#  --all-transcripts. Genotype columns are blank (sites-only) and inheritance = NA.
+#  Two ways in:
+#    -v/--variant '<v>'   resolve + annotate variant(s) from scratch (repeatable).
+#    --lookup <vcf.gz>    analyze a pre-annotated *.germline.vep.vcf.gz directly.
+#  <v> is dashed/colon GRCh38 coords (chr2-166199981-A-G | 2:166199981:A:G),
+#  resolved offline, OR transcript-qualified HGVS (ENST…:c.…), recoded to coords
+#  via the Ensembl REST API (only the variant string is sent, never patient data).
+#  -v builds a sites-only VCF and runs vep_annotate.sh, removing the annotated
+#  VCF afterward unless --keep-vcf. The panel (Association/MOI/GDV columns) is the
+#  default g4e-2025 unless overridden with -l/--list <genes> (or a positional file).
 #############################################################################
 
 # ── Tunable thresholds (single source of truth) ──
@@ -73,6 +90,10 @@ my $CADD_MIN   = 25.3;   # CADD PHRED rescue threshold
 my $REVEL_MIN  = 0.644;  # REVEL rescue threshold (ClinGen PP3)
 my $AM_MIN     = 0.792;  # AlphaMissense pathogenicity rescue threshold
 my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
+
+# Ensembl REST endpoint for HGVS->coordinate recoding in -v/-l variant mode
+# (override with $ENSEMBL_REST; point at a private mirror on an air-gapped host).
+my $ENSEMBL_REST = $ENV{ENSEMBL_REST} // 'https://rest.ensembl.org';
 
 # High-impact loss-of-function consequences (LoF rescue arm; see inclusion gate).
 my %LOF_CONS = map { $_ => 1 }
@@ -112,18 +133,33 @@ print "hash mane, listo!\n";
 # ── Argument parsing ──
 #   --proband NAME   (repeatable) force NAME as a proband, overriding filename-
 #                    based auto-discovery. NAME must have <NAME>.germline.vep.vcf.gz.
-#   <positional>     genes-of-interest file (gene panel override; see below).
+#   -l/--list FILE   candidate-gene panel override (replaces default g4e-2025).
+#                    The ONLY way to set the panel (no positional form). Applies
+#                    to normal runs and to -v/--lookup variant consults alike.
 #
 # Gene panel: gene -> "Association \t MOI \t GDV".
-#   Default source = g4e-2025.txt (4 columns). A genes-of-interest file (one gene
-#   symbol per line; plain symbols -> Association/MOI/GDV = "NA", or full 4-column
-#   g4e format) overrides it. '#' comments and blanks are skipped.
-my (@force_probands, $GENES_FILE);
+#   Default source = g4e-2025.txt (4 columns). A genes-of-interest file given via
+#   -l/--list (one gene symbol per line; plain symbols -> Association/MOI/GDV =
+#   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
+my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
+my ($LOOKUP, $ALL_TX, $KEEP_VCF) = (0, 0, 0);
 while (@ARGV) {
     my $a = shift @ARGV;
     if    ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
     elsif ($a =~ /^--proband=(.+)$/)        { push @force_probands, $1; }
-    else                                    { $GENES_FILE = $a; }   # positional = genes file
+    elsif ($a eq '--lookup')                { $LOOKUP = 1; $LOOKUP_FILE = (shift @ARGV // ''); }
+    elsif ($a =~ /^--lookup=(.+)$/)         { $LOOKUP = 1; $LOOKUP_FILE = $1; }
+    elsif ($a eq '--variant' || $a eq '-v') { push @VARIANTS, (shift @ARGV // ''); }
+    elsif ($a =~ /^--variant=(.+)$/)        { push @VARIANTS, $1; }
+    elsif ($a eq '--list'  || $a eq '-l')   { $GENES_FILE = (shift @ARGV // ''); }   # candidate-gene panel override
+    elsif ($a =~ /^--list=(.+)$/)           { $GENES_FILE = $1; }
+    elsif ($a eq '--all-transcripts')       { $ALL_TX = 1; }
+    elsif ($a eq '--keep-vcf')              { $KEEP_VCF = 1; }
+    else {
+        die "unknown argument: '$a'\n".
+            "  set the candidate-gene panel with  -l/--list FILE  (no positional form);\n".
+            "  a single variant with  -v/--variant '<v>' , a pre-annotated VCF with  --lookup FILE.\n";
+    }
 }
 my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2025.txt";
 my $custom_panel = (defined $GENES_FILE && $GENES_FILE ne "") ? 1 : 0;
@@ -329,7 +365,9 @@ sub clinvar_stars {
 # ClinVar amino-acid-level evidence for PS1/PM5, built from the MANE-missense
 # split (clinvar.MANE_missense.{PLP,BLB}.tsv). Returns a hashref keyed by
 # "GENE\tAApos\tRefAA" -> { AltAA => max_stars }, so a candidate's residue can be
-# checked for the SAME change (PS1) or a DIFFERENT pathogenic change (PM5).
+# checked for the SAME change (PS1) or a DIFFERENT pathogenic change (PM5). A
+# single-codon in-frame deletion of that residue also triggers PM5 (it is a
+# different protein change at the same P/LP residue) — see the call site.
 sub load_clinvar_aa {
     my ($file) = @_;
     my %resid;
@@ -470,6 +508,146 @@ sub acmg_classify {
 }
 
 #############################################################################
+# Single-variant entry point: resolve -> sites-only VCF -> vep_annotate.sh
+#
+# Lets filtering_r.pl take a variant directly (-v / -l) instead of a pre-made
+# annotated VCF. Coordinates are normalized offline; HGVS is recoded to genomic
+# coordinates via the Ensembl REST API (only the variant string is transmitted,
+# never patient data). The resulting *.germline.vep.vcf.gz is then analyzed in
+# lookup mode. Needs curl + jq for the HGVS path (coords need neither).
+#############################################################################
+
+# Minimal sites-only VCF header with GRCh38 'chr' contigs (so bcftools norm in
+# vep_annotate.sh has them defined).
+sub lookup_vcf_header {
+    return <<'EOF';
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422,assembly=GRCh38>
+##contig=<ID=chr2,length=242193529,assembly=GRCh38>
+##contig=<ID=chr3,length=198295559,assembly=GRCh38>
+##contig=<ID=chr4,length=190214555,assembly=GRCh38>
+##contig=<ID=chr5,length=181538259,assembly=GRCh38>
+##contig=<ID=chr6,length=170805979,assembly=GRCh38>
+##contig=<ID=chr7,length=159345973,assembly=GRCh38>
+##contig=<ID=chr8,length=145138636,assembly=GRCh38>
+##contig=<ID=chr9,length=138394717,assembly=GRCh38>
+##contig=<ID=chr10,length=133797422,assembly=GRCh38>
+##contig=<ID=chr11,length=135086622,assembly=GRCh38>
+##contig=<ID=chr12,length=133275309,assembly=GRCh38>
+##contig=<ID=chr13,length=114364328,assembly=GRCh38>
+##contig=<ID=chr14,length=107043718,assembly=GRCh38>
+##contig=<ID=chr15,length=101991189,assembly=GRCh38>
+##contig=<ID=chr16,length=90338345,assembly=GRCh38>
+##contig=<ID=chr17,length=83257441,assembly=GRCh38>
+##contig=<ID=chr18,length=80373285,assembly=GRCh38>
+##contig=<ID=chr19,length=58617616,assembly=GRCh38>
+##contig=<ID=chr20,length=64444167,assembly=GRCh38>
+##contig=<ID=chr21,length=46709983,assembly=GRCh38>
+##contig=<ID=chr22,length=50818468,assembly=GRCh38>
+##contig=<ID=chrX,length=156040895,assembly=GRCh38>
+##contig=<ID=chrY,length=57227415,assembly=GRCh38>
+##contig=<ID=chrM,length=16569,assembly=GRCh38>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+EOF
+}
+
+# Resolve one variant string to (chr, pos, REF, ALT). Dashed/colon/space coords
+# (chr2-166199981-A-G | 2:166199981:A:G | 'chr2 166199981 A G') are parsed
+# offline; anything else is treated as HGVS and recoded via Ensembl REST.
+sub resolve_variant {
+    my ($v, $work) = @_;
+    (my $norm = $v) =~ s/[:\-]/ /g;
+    my @f = split ' ', $norm;
+    # chr-pos-ref-alt (4 fields) — VCF-style, POS = first REF base.
+    if (@f == 4 && $f[1] =~ /^\d+$/
+        && $f[2] =~ /^[ACGTNacgtn]+$/ && $f[3] =~ /^[ACGTNacgtn*]+$/) {
+        my $chrom = ($f[0] =~ /^chr/i) ? $f[0] : "chr$f[0]";
+        printf "[lookup] coordinates: %s:%s %s>%s\n", $chrom, $f[1], uc $f[2], uc $f[3];
+        return ($chrom, $f[1], uc $f[2], uc $f[3]);
+    }
+    # chr-start-end-ref-alt (5 fields) — .candidatos column order; POS = start,
+    # END ignored (it's start+len(REF)-1). bcftools norm in vep_annotate.sh
+    # left-aligns, so a VCF-style anchored REF/ALT is what's expected here.
+    if (@f == 5 && $f[1] =~ /^\d+$/ && $f[2] =~ /^\d+$/
+        && $f[3] =~ /^[ACGTNacgtn]+$/ && $f[4] =~ /^[ACGTNacgtn*]+$/) {
+        my $chrom = ($f[0] =~ /^chr/i) ? $f[0] : "chr$f[0]";
+        printf "[lookup] coordinates: %s:%s-%s %s>%s (POS=%s, END dropped)\n",
+               $chrom, $f[1], $f[2], uc $f[3], uc $f[4], $f[1];
+        return ($chrom, $f[1], uc $f[3], uc $f[4]);
+    }
+    return resolve_hgvs($v, $work);
+}
+
+# Recode an HGVS string to GRCh38 genomic coords via Ensembl variant_recoder.
+# Needs curl + jq. Dies with an actionable message on failure.
+sub resolve_hgvs {
+    my ($v, $work) = @_;
+    print "[lookup] HGVS input: $v\n";
+    print "[lookup] resolving via Ensembl REST ($ENSEMBL_REST) — only the variant notation is sent, no patient data.\n";
+    (my $enc = $v) =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
+    my $url  = "$ENSEMBL_REST/variant_recoder/human/$enc?content-type=application/json&vcf_string=1";
+    my $json = "$work/rest.json";
+    system("timeout 30 curl -sS '$url' > '$json' 2>'$work/rest.err'");
+    my $resp = "";
+    if (open my $jh, "<", $json) { local $/; $resp = <$jh>; close $jh; }
+    if (!defined $resp || $resp eq "") {
+        warn "[lookup] no response from Ensembl REST (offline, or endpoint unreachable).\n";
+        warn "         On an air-gapped host, pass genomic coordinates (chr-pos-ref-alt) instead.\n";
+        die  "[lookup] HGVS resolution failed for: $v\n";
+    }
+    my $err = qx(jq -r 'if type=="object" and has("error") then .error else empty end' '$json' 2>/dev/null);
+    chomp $err;
+    if ($err ne "") {
+        warn "[lookup] Ensembl could not resolve this HGVS: $err\n";
+        warn "         Use a transcript-qualified ENST\x{2026} HGVS (this cache is Ensembl, not RefSeq), or pass coordinates.\n";
+        die  "[lookup] HGVS resolution failed for: $v\n";
+    }
+    my $vcfstr = qx(jq -r '.[] | to_entries[] | .value.vcf_string[]?' '$json' 2>/dev/null | grep -E '^(MT|X|Y|[0-9]+)-' | head -1);
+    chomp $vcfstr;
+    die "[lookup] could not extract genomic coordinates from the HGVS resolution for: $v\n" if $vcfstr eq "";
+    my ($rchr,$rpos,$rref,$ralt) = split /-/, $vcfstr;
+    $rchr = "M" if $rchr eq "MT";
+    $rchr = "chr$rchr";
+    printf "[lookup] resolved to: %s:%s %s>%s\n", $rchr, $rpos, $rref, $ralt;
+    return ($rchr, $rpos, $rref, $ralt);
+}
+
+# Build a sites-only VCF for all requested variants and annotate it through
+# vep_annotate.sh. Returns (annotated_vcf, scratch_dir). The annotated VCF is
+# named lookup.<tag>.germline.vep.vcf.gz so lookup mode derives a clean output
+# name (lookup.<tag>.<panel>.candidatos).
+sub build_and_annotate_lookup {
+    my ($vars) = @_;
+    my @reqs = grep { defined && $_ ne "" } @$vars;
+    die "no variants given (use -v/--variant)\n" unless @reqs;
+
+    my $work = qx(mktemp -d); chomp $work;
+    die "could not create scratch dir (mktemp)\n" unless $work ne "" && -d $work;
+    my $raw = "$work/variant.vcf";
+    open my $rfh, ">", $raw or die "$raw: $!";
+    print $rfh lookup_vcf_header();
+    my @ids;
+    for my $v (@reqs) {
+        my ($chr,$pos,$ref,$alt) = resolve_variant($v, $work);
+        printf $rfh "%s\t%s\t.\t%s\t%s\t.\t.\t.\n", $chr, $pos, $ref, $alt;
+        push @ids, "$chr-$pos-$ref-$alt";
+    }
+    close $rfh;
+
+    my $tag = (@ids == 1) ? $ids[0] : $ids[0] . "+" . (scalar(@ids) - 1);
+    $tag =~ s/[^A-Za-z0-9._-]/_/g;
+    my $ann = "lookup.$tag.germline.vep.vcf.gz";
+
+    printf "[lookup] %d variant(s) -> sites-only VCF; annotating via vep_annotate.sh (this can take a few minutes) ...\n", scalar @ids;
+    my $rc = system("bash vep_annotate.sh '$raw' '$ann' > '$work/annotate.log' 2>&1");
+    if ($rc != 0) {
+        system("tail -25 '$work/annotate.log' 1>&2");
+        die "[lookup] annotation failed (see vep_annotate.sh output above)\n";
+    }
+    return ($ann, $work);
+}
+
+#############################################################################
 # Discover trios / duos from filenames
 #
 # Role-suffix naming convention (single source of truth — see sample_role):
@@ -561,6 +739,36 @@ if (@force_probands) {
     }
 }
 
+# ── Variant entry point (-v / -l): build + annotate, then enter lookup mode ──
+# Resolve the requested variant(s) to a sites-only chr-prefixed VCF, annotate it
+# through vep_annotate.sh, and feed the result into lookup mode below. The
+# annotated VCF + scratch dir are cleaned up after the run (unless --keep-vcf).
+my ($LOOKUP_ANN, $LOOKUP_WORK);
+if (@VARIANTS) {
+    die "give EITHER variant input (-v) OR --lookup, not both\n" if $LOOKUP;
+    ($LOOKUP_ANN, $LOOKUP_WORK) = build_and_annotate_lookup(\@VARIANTS);
+    $LOOKUP      = 1;
+    $LOOKUP_FILE = $LOOKUP_ANN;
+}
+
+# ── Single-variant lookup mode ──
+# One explicit annotated VCF (sites-only or single-sample), analyzed as a
+# singleton with the panel / rarity / consequence / rescue gates and the
+# recessive-carrier drop all bypassed: report EVERY qualifying annotation of
+# the variant in the standard .candidatos format. MANE-only unless
+# --all-transcripts. Overrides any filename-based discovery above.
+if ($LOOKUP) {
+    die "--lookup needs an annotated VCF (<name>.germline.vep.vcf.gz)\n"
+        unless defined $LOOKUP_FILE && $LOOKUP_FILE ne "";
+    die "--lookup file not found: $LOOKUP_FILE\n" unless -e $LOOKUP_FILE;
+    (my $name = $LOOKUP_FILE) =~ s{.*/}{};
+    $name =~ s/\.germline\.vep\.vcf\.gz$//;
+    $name =~ s/\.vcf(\.gz)?$//;
+    %file_for   = ($name => $LOOKUP_FILE);
+    @probands   = ($name);
+    %parents_of = ($name => { m => undef, f => undef });
+}
+
 print "muestras encontradas: ", join(", ", sort keys %file_for), "\n";
 print "probandos: ", join(", ", @probands), (@force_probands ? " (forced override)" : ""), "\n";
 
@@ -590,8 +798,8 @@ foreach my $proband (@probands) {
     my $have_f = defined $ffile;
 
     my $tsv   = "$proband.$PANEL_TAG.pangolin.tsv";
-    my $final = -e $tsv;
-    my $pscore = $final ? load_scores($tsv) : {};
+    my $final = $LOOKUP ? 1 : -e $tsv;          # lookup reports immediately (no 2-pass)
+    my $pscore = (-e $tsv) ? load_scores($tsv) : {};
 
     my $kind = ($have_m && $have_f) ? "trio" : ($have_m||$have_f) ? "duo" : "singleton";
     print "\ntrabajando con $proband ($kind, ",
@@ -682,10 +890,10 @@ foreach my $proband (@probands) {
             my $transcript  = field(\@r,$i{transcript});
             my $consequence = field(\@r,$i{consequence});
 
-            next unless exists $mane{$transcript};   # both paths require MANE
+            next if !exists($mane{$transcript}) && !($LOOKUP && $ALL_TX);  # MANE-only unless --all-transcripts (lookup)
             my $in_panel = exists $epigenes{$gene};
             my $in_acmg  = exists $acmg{$gene};
-            next unless $in_panel || $in_acmg;
+            next if !($in_panel || $in_acmg) && !$LOOKUP;   # lookup reports off-panel genes too
 
             my $g_ac = field(\@r,$i{g_ac}); $g_ac = ($g_ac eq "") ? 0 : $g_ac;
             my $g_an = field(\@r,$i{g_an}); $g_an = ($g_an eq "") ? 0 : $g_an;
@@ -700,6 +908,10 @@ foreach my $proband (@probands) {
                 $p_moi //= "";
                 my $recessive = ($p_moi =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0;
                 $cand_structural = ($freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
+            }
+            if ($LOOKUP) {                 # report-everything: force structural pass
+                $cand_structural = 1;
+                if ($in_panel) { ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene}; $p_moi //= ""; }
             }
 
             # Collect candidate structural-pass variants for Pangolin. Done in BOTH
@@ -733,32 +945,48 @@ foreach my $proband (@probands) {
             my $pangolin  = exists $pscore->{$my_id} ? $pscore->{$my_id} : "";
 
             # ── PS1 / PM5 from ClinVar amino-acid evidence (>=1 star) ──
-            # PS1: SAME amino-acid change is P/LP. PM5: a DIFFERENT change at the
-            # same residue is P/LP. Flagged (conflicting) when the matched change
-            # is also reported B/LB. Missense only; needs the AA resource loaded.
+            # PS1: SAME missense change is P/LP. PM5: a DIFFERENT change at the same
+            # residue is P/LP. EXTENDED: a single-codon in-frame deletion removing
+            # residue X is treated as PM5 when any missense at X is P/LP — a
+            # different protein change at the same residue is pathogenic, i.e. the
+            # residue is intolerant (per-ACMG this is a curatorial extension of PM5
+            # beyond missense; flagged in the detail as "(in-frame del)"). Flagged
+            # (conflicting) when the matched change is also B/LB. Needs the AA resource.
             my ($aa_crit,$aa_detail,$aa_conflict) = ("","",0);
-            my $aa_field = field(\@r,$i{aa});                  # e.g. "R/H"
-            my ($refAA,$altAA) = $aa_field =~ m{^([A-Za-z])/([A-Za-z])$} ? ($1,$2) : ("","");
-            my ($paapos) = (field(\@r,$i{ppos}) =~ /(\d+)/);
+            my $aa_field = field(\@r,$i{aa});                  # missense "R/H"; 1-codon del "I/-"
+            my $ppos_raw = field(\@r,$i{ppos});                # "1922" (single) or "1922-1924" (range)
+            my ($aa_ref,$aa_alt) = split m{/}, $aa_field, 2;
+            $aa_ref = defined $aa_ref ? uc $aa_ref : "";
+            $aa_alt = defined $aa_alt ? uc $aa_alt : "";
+            my ($paapos) = ($ppos_raw =~ /(\d+)/);
             $paapos = defined $paapos ? $paapos : "";
-            if ($CLINVAR_AA_ON && $gene ne "" && $paapos ne "" && $refAA ne "" && $altAA ne "") {
+            my $single_res  = ($ppos_raw =~ /^\d+$/) ? 1 : 0;                       # one residue, no range
+            my $is_missense = ($aa_ref =~ /^[A-Z]$/ && $aa_alt =~ /^[A-Z]$/) ? 1 : 0;
+            my $is_codondel = (!$is_missense && $single_res && $aa_ref =~ /^[A-Z]$/
+                               && $aa_alt =~ /^-?$/ && $consequence =~ /inframe_deletion/) ? 1 : 0;
+            if ($CLINVAR_AA_ON && $gene ne "" && $paapos ne "" && ($is_missense || $is_codondel)) {
+                my $refAA = $aa_ref;
+                my $altAA = $aa_alt;                       # "" for a deleted residue
                 my $k   = "$gene\t$paapos\t$refAA";
                 my $plp = $PLP_resid->{$k};
                 if ($plp) {
-                    if (exists $plp->{$altAA} && $plp->{$altAA} >= 1) {           # PS1
+                    if ($is_missense && exists $plp->{$altAA} && $plp->{$altAA} >= 1) {   # PS1
                         $aa_crit   = "PS1";
                         $aa_detail = sprintf("PS1:%s p.%s%s%s (%d*)", $gene,$refAA,$paapos,$altAA,$plp->{$altAA});
                         $aa_conflict = 1 if exists $BLB_resid->{$k}{$altAA};
-                    } else {                                                     # PM5
+                    } else {                                                             # PM5
                         my ($balt,$bst) = ("",0);
                         for my $a (keys %$plp) {
-                            next if $a eq $altAA;
+                            next if $is_missense && $a eq $altAA;   # exact match is PS1, handled above
                             ($balt,$bst) = ($a,$plp->{$a}) if $plp->{$a} >= 1 && $plp->{$a} > $bst;
                         }
                         if ($balt ne "") {
-                            $aa_crit   = "PM5";
-                            $aa_detail = sprintf("PM5:%s p.%s%s%s [P/LP at residue: p.%s%s%s (%d*)]",
-                                                 $gene,$refAA,$paapos,$altAA, $refAA,$paapos,$balt,$bst);
+                            $aa_crit = "PM5";
+                            $aa_detail = $is_codondel
+                              ? sprintf("PM5:%s p.%s%sdel (in-frame del) [P/LP missense at residue: p.%s%s%s (%d*)]",
+                                        $gene,$refAA,$paapos, $refAA,$paapos,$balt,$bst)
+                              : sprintf("PM5:%s p.%s%s%s [P/LP at residue: p.%s%s%s (%d*)]",
+                                        $gene,$refAA,$paapos,$altAA, $refAA,$paapos,$balt,$bst);
                             $aa_conflict = 1 if exists $BLB_resid->{$k}{$balt};
                         }
                     }
@@ -814,8 +1042,30 @@ foreach my $proband (@probands) {
                 }
             }
 
-            next unless @kept;
-            my $kept_by = join(";", @kept);
+            # Lookup: report the variant even when no evidence arm fires; supply
+            # panel / ACMG-SF / NA context for the Association/MOI/GDV columns.
+            if ($LOOKUP && !@kept) {
+                $class = "lookup";
+                if ($in_panel) {
+                    ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv);
+                } elsif ($in_acmg) {
+                    my ($ac_cond,$ac_moi) = split /\t/, $acmg{$gene};
+                    ($assoc,$moi,$gdv) = ($ac_cond, $ac_moi, "Incidental?");
+                } else {
+                    ($assoc,$moi,$gdv) = ("NA","NA","NA");
+                }
+            }
+            next unless @kept || $LOOKUP;
+            my $kept_by = @kept ? join(";", @kept) : "none";
+
+            # Lookup: always surface ACMG-SF context for a secondary-findings gene
+            # that isn't in the candidate panel (panel context wins when both).
+            if ($LOOKUP && $in_acmg && !$in_panel) {
+                my ($ac_cond,$ac_moi) = split /\t/, $acmg{$gene};
+                $assoc = $ac_cond     if !defined $assoc || $assoc eq "";
+                $moi   = $ac_moi      if !defined $moi   || $moi   eq "";
+                $gdv   = "Incidental" if !defined $gdv   || $gdv   eq "";
+            }
 
             # ── Inheritance from parental GT (carrier = non-ref) [#10] ──
             my $in_m = exists $mama->{$my_id};
@@ -899,12 +1149,14 @@ foreach my $proband (@probands) {
     }
     close $pfh;
 
-    # ── Always (re)write the Pangolin candidate input for this run ──
+    # ── (Re)write the Pangolin candidate input for this run (skipped in lookup) ──
     my $csv = "$proband.$PANEL_TAG.pangolin_input.csv";
-    open my $cfh, ">", $csv or die "$csv: $!";
-    print $cfh "CHROM,POS,REF,ALT\n";
-    print $cfh "$emit{$_}\n" for sort keys %emit;
-    close $cfh;
+    unless ($LOOKUP) {
+        open my $cfh, ">", $csv or die "$csv: $!";
+        print $cfh "CHROM,POS,REF,ALT\n";
+        print $cfh "$emit{$_}\n" for sort keys %emit;
+        close $cfh;
+    }
 
     if (!$final) {
         printf "  EMIT: %d structural-pass variants -> %s\n", scalar(keys %emit), $csv;
@@ -937,7 +1189,7 @@ foreach my $proband (@probands) {
     @rows = grep {
         my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
         !( ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic )
-    } @rows;
+    } @rows unless $LOOKUP;   # lookup keeps solitary carriers (report everything)
 
     for my $row (@rows) {
         $row->{data}{recessive_flag} =
@@ -967,6 +1219,16 @@ foreach my $proband (@probands) {
     print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
     print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
     print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
+}
+
+# ── Variant-mode cleanup: drop the annotated lookup VCF + scratch dir ──
+if (defined $LOOKUP_ANN) {
+    if ($KEEP_VCF) {
+        print "kept annotated VCF: $LOOKUP_ANN\n";
+    } else {
+        unlink $LOOKUP_ANN, "$LOOKUP_ANN.tbi", "$LOOKUP_ANN.csi", "${LOOKUP_ANN}_summary.html";
+    }
+    system("rm", "-rf", $LOOKUP_WORK) if defined $LOOKUP_WORK && -d $LOOKUP_WORK;
 }
 
 print "\nlisto!\n";

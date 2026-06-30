@@ -27,7 +27,9 @@ cd "${WORKDIR:-$(dirname "$(readlink -f "$0")")}"
 #                        PROBAND="EPIC280 EPIC280M" bash run_filtering.sh genes.txt
 PROBAND_ARGS=()
 for _p in ${PROBAND:-}; do PROBAND_ARGS+=(--proband "$_p"); done
-FWD=("${PROBAND_ARGS[@]+"${PROBAND_ARGS[@]}"}" ${GENES:+"$GENES"})
+GENES_ARGS=()
+[[ -n "$GENES" ]] && GENES_ARGS=(--list "$GENES")   # filtering_r.pl takes the panel via -l/--list only
+FWD=("${PROBAND_ARGS[@]+"${PROBAND_ARGS[@]}"}" "${GENES_ARGS[@]+"${GENES_ARGS[@]}"}")
 
 # Configurable environment (defaults match the original setup).
 source "${CONDA_BASE:-$HOME/miniconda3}/etc/profile.d/conda.sh"

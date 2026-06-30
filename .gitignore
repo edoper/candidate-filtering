@@ -15,6 +15,7 @@
 # Pipeline code
 !.gitignore
 !README.md
+!CLAUDE.md
 !LICENSE
 !filtering_r.pl
 !parse_pangolin.pl
