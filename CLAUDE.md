@@ -10,7 +10,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 
 ## ⚠️ Patient data / PHI — read first
 
-- Patient VCFs and **all run outputs** (`*.candidatos`, `*.pangolin*`, `*_summary.html`, logs,
+- Patient VCFs and **all run outputs** (`*.candidatos`, `*.readable.txt`, `*.pangolin*`, `*_summary.html`, logs,
   `*.vcf.gz`/`*.cram`) are **PHI and must never be committed**.
 - `.gitignore` is an **allow-list**: it ignores `*` and then un-ignores only code + non-patient
   reference config. **Never remove the leading `*` rule.** To track a new code/config file, add
@@ -22,7 +22,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | File | Purpose |
 |------|---------|
 | `vep_annotate.sh` | Split multiallelics + Ensembl VEP (LOFTEE/REVEL/AlphaMissense/EVE/CADD + custom gnomAD v4.1 & ClinVar). → `*.germline.vep.vcf.gz` |
-| `filtering_r.pl` | The filtering algorithm (Perl, no modules). Reads annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. **All thresholds are constants at the top of this file.** Also the single-variant consult entry point (`-v`/`-l`): coords/HGVS in → annotate → full `.candidatos` row(s), gates bypassed. |
+| `filtering_r.pl` | The filtering algorithm (Perl, no modules). Reads annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. **All thresholds are constants at the top of this file.** Also the single-variant consult entry point (`-v`): coords/HGVS in → annotate → transposed readable view (`<name>.<panel>.readable.txt`), gates bypassed. |
 | `parse_pangolin.pl` | Reduce Pangolin output to per-variant `max(\|Δ\|)` splice score. |
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
 | `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
@@ -89,10 +89,12 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   `-v` consults alike; sets the Association/MOI/GDV columns and the output `<panel>` tag.
 - **Lookup mode** (`filtering_r.pl -v <variant>` (repeatable), or `--lookup <annotated.vcf.gz>`)
   bypasses all gates to report variants in full; all changes are `$LOOKUP`-guarded so normal runs
-  are unaffected. `-v` builds a sites-only VCF and runs `vep_annotate.sh` internally, removing the
-  annotated VCF afterward unless `--keep-vcf`. Coordinates are fully offline; **HGVS resolution
-  calls the Ensembl REST API** (only the variant string, never patient data; needs `curl`+`jq`) and
-  needs `ENST…` ids (the cache is Ensembl, not RefSeq).
+  are unaffected. `-v` builds a sites-only VCF, runs `vep_annotate.sh`, **and runs Pangolin inline**
+  (so `pangolin_score` + the splice rescue arm work for a single variant too) — removing the
+  annotated VCF + splice scratch afterward unless `--keep-vcf`. Pangolin degrades gracefully (warns,
+  leaves score blank) if the env/refs are absent; **`--no-splice`** skips it. Coordinates are fully
+  offline; **HGVS resolution calls the Ensembl REST API** (only the variant string, never patient
+  data; needs `curl`+`jq`) and needs `ENST…` ids (the cache is Ensembl, not RefSeq).
 
 ## ACMG criteria evaluated (triage-grade)
 

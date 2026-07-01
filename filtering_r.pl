@@ -66,20 +66,24 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #
 # Single-variant lookup mode
 # --------------------------
-#  Report EVERYTHING for one (or a few) variants in the standard .candidatos
-#  format with the panel / rarity / consequence / rescue gates and the
-#  recessive-carrier drop all BYPASSED (off-panel genes get Association/MOI/GDV =
-#  NA; kept_by lists whichever evidence arms fire, else "none"). MANE-only unless
-#  --all-transcripts. Genotype columns are blank (sites-only) and inheritance = NA.
+#  Report EVERYTHING for one (or a few) variants with the panel / rarity /
+#  consequence / rescue gates and the recessive-carrier drop all BYPASSED
+#  (off-panel genes get Association/MOI/GDV = NA; kept_by lists whichever evidence
+#  arms fire, else "none"). MANE-only unless --all-transcripts. Genotype columns
+#  are blank (sites-only) and inheritance = NA.
+#  Output is the TRANSPOSED, human-readable view only — one "field <TAB> value"
+#  line per column (no TSV candidatos table) — written to <name>.<panel>.readable.txt
+#  and echoed to stdout.
 #  Two ways in:
 #    -v/--variant '<v>'   resolve + annotate variant(s) from scratch (repeatable).
 #    --lookup <vcf.gz>    analyze a pre-annotated *.germline.vep.vcf.gz directly.
-#  <v> is dashed/colon GRCh38 coords (chr2-166199981-A-G | 2:166199981:A:G),
-#  resolved offline, OR transcript-qualified HGVS (ENST…:c.…), recoded to coords
-#  via the Ensembl REST API (only the variant string is sent, never patient data).
+#  <v> is dashed/colon GRCh38 coords (chr2-166199981-A-G | 2:166199981:A:G, also
+#  the 5-field chr-start-end-ref-alt form), resolved offline, OR transcript-
+#  qualified HGVS (ENST…:c.…), recoded to coords via the Ensembl REST API (only the
+#  variant string is sent, never patient data).
 #  -v builds a sites-only VCF and runs vep_annotate.sh, removing the annotated
 #  VCF afterward unless --keep-vcf. The panel (Association/MOI/GDV columns) is the
-#  default g4e-2025 unless overridden with -l/--list <genes> (or a positional file).
+#  default g4e-2025 unless overridden with -l/--list <genes>.
 #############################################################################
 
 # ── Tunable thresholds (single source of truth) ──
@@ -142,7 +146,7 @@ print "hash mane, listo!\n";
 #   -l/--list (one gene symbol per line; plain symbols -> Association/MOI/GDV =
 #   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
 my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
-my ($LOOKUP, $ALL_TX, $KEEP_VCF) = (0, 0, 0);
+my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
 while (@ARGV) {
     my $a = shift @ARGV;
     if    ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
@@ -155,6 +159,7 @@ while (@ARGV) {
     elsif ($a =~ /^--list=(.+)$/)           { $GENES_FILE = $1; }
     elsif ($a eq '--all-transcripts')       { $ALL_TX = 1; }
     elsif ($a eq '--keep-vcf')              { $KEEP_VCF = 1; }
+    elsif ($a eq '--no-splice')             { $NO_SPLICE = 1; }   # -v: skip Pangolin splice scoring
     else {
         die "unknown argument: '$a'\n".
             "  set the candidate-gene panel with  -l/--list FILE  (no positional form);\n".
@@ -615,7 +620,7 @@ sub resolve_hgvs {
 # Build a sites-only VCF for all requested variants and annotate it through
 # vep_annotate.sh. Returns (annotated_vcf, scratch_dir). The annotated VCF is
 # named lookup.<tag>.germline.vep.vcf.gz so lookup mode derives a clean output
-# name (lookup.<tag>.<panel>.candidatos).
+# name (lookup.<tag>.<panel>.readable.txt).
 sub build_and_annotate_lookup {
     my ($vars) = @_;
     my @reqs = grep { defined && $_ ne "" } @$vars;
@@ -644,7 +649,65 @@ sub build_and_annotate_lookup {
         system("tail -25 '$work/annotate.log' 1>&2");
         die "[lookup] annotation failed (see vep_annotate.sh output above)\n";
     }
+
+    # Splice scoring: a single-variant consult is meant to report EVERYTHING, so
+    # (unless --no-splice) run Pangolin on the variant(s) inline and drop the
+    # scores where the main loop expects them (lookup.<tag>.<panel>.pangolin.tsv).
+    # Degrades gracefully — a missing env/reference or a Pangolin failure just
+    # leaves pangolin_score blank; it never aborts the consult.
+    unless ($NO_SPLICE) {
+        my $tsv = "lookup.$tag.$PANEL_TAG.pangolin.tsv";
+        run_pangolin_lookup($ann, $work, $tsv);
+    }
     return ($ann, $work);
+}
+
+# Score the annotated lookup variant(s) with Pangolin and write parse_pangolin's
+# per-variant max|delta| map to $tsv (keyed chr-pos-ref-alt, matching the main
+# loop's $my_id — built from the NORMALIZED annotated VCF, not the raw input).
+# Returns 1 on success; on any problem warns and returns 0 (pangolin_score stays
+# blank). Env overrides mirror run_filtering.sh: $CONDA_BASE / $PANGOLIN_ENV /
+# $PANGOLIN_FASTA / $PANGOLIN_DB.
+sub run_pangolin_lookup {
+    my ($ann, $work, $tsv) = @_;
+    my $conda = $ENV{CONDA_BASE}     // "$ENV{HOME}/miniconda3";
+    my $env   = $ENV{PANGOLIN_ENV}   // "pangolin";
+    my $fa    = $ENV{PANGOLIN_FASTA} // "$ENV{HOME}/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa";
+    my $db    = $ENV{PANGOLIN_DB}    // "$ENV{HOME}/vep_refs/pangolin/gencode.v38.annotation.db";
+    unless (-e "$conda/etc/profile.d/conda.sh" && -e $fa && -e $db) {
+        warn "[lookup] Pangolin skipped — conda env or reference not found (pangolin_score stays blank; use --no-splice to silence).\n";
+        return 0;
+    }
+
+    my $csv = "$work/pangolin_input.csv";
+    open my $cf, ">", $csv or do { warn "[lookup] Pangolin: cannot write $csv ($!)\n"; return 0; };
+    print $cf "CHROM,POS,REF,ALT\n";
+    my $n = 0;
+    my $fh = open_vcf($ann);
+    while (my $line = <$fh>) {
+        next if $line =~ /^#/;
+        my @c = split /\t/, $line;
+        next if $c[4] =~ /,/;                       # pre-split; skip any residual multiallelic
+        print $cf "$c[0],$c[1],$c[3],$c[4]\n"; $n++;
+    }
+    close $fh; close $cf;
+    return 0 unless $n;
+
+    print "[lookup] scoring splicing with Pangolin ($n variant(s), env '$env') ...\n";
+    my $out = "$work/pangolin_out";                  # pangolin writes <out>.csv
+    my $sh  = "source '$conda/etc/profile.d/conda.sh' && conda activate '$env' && "
+            . "pangolin '$csv' '$fa' '$db' '$out' -c CHROM,POS,REF,ALT";
+    if (system("bash", "-c", "$sh > '$work/pangolin.log' 2>&1") != 0 || !-e "$out.csv") {
+        warn "[lookup] Pangolin failed (pangolin_score stays blank); tail of log:\n";
+        system("tail -12 '$work/pangolin.log' 1>&2");
+        return 0;
+    }
+    if (system("perl parse_pangolin.pl '$out.csv' > '$tsv' 2>'$work/parse.log'") != 0) {
+        warn "[lookup] parse_pangolin.pl failed (pangolin_score stays blank)\n";
+        unlink $tsv;
+        return 0;
+    }
+    return 1;
 }
 
 #############################################################################
@@ -755,7 +818,7 @@ if (@VARIANTS) {
 # One explicit annotated VCF (sites-only or single-sample), analyzed as a
 # singleton with the panel / rarity / consequence / rescue gates and the
 # recessive-carrier drop all bypassed: report EVERY qualifying annotation of
-# the variant in the standard .candidatos format. MANE-only unless
+# the variant in the transposed readable format. MANE-only unless
 # --all-transcripts. Overrides any filename-based discovery above.
 if ($LOOKUP) {
     die "--lookup needs an annotated VCF (<name>.germline.vep.vcf.gz)\n"
@@ -802,8 +865,9 @@ foreach my $proband (@probands) {
     my $pscore = (-e $tsv) ? load_scores($tsv) : {};
 
     my $kind = ($have_m && $have_f) ? "trio" : ($have_m||$have_f) ? "duo" : "singleton";
-    print "\ntrabajando con $proband ($kind, ",
-          ($final ? "FINAL: scores from $tsv" : "EMIT: no scores yet"), ")";
+    my $final_desc = $final ? ((-e $tsv) ? "FINAL: splice scores from $tsv" : "FINAL: no splice scores")
+                            : "EMIT: no scores yet";
+    print "\ntrabajando con $proband ($kind, $final_desc)";
     print " | madre: $mfile" if $have_m;
     print " | padre: $ffile" if $have_f;
     print "\n";
@@ -1196,38 +1260,66 @@ foreach my $proband (@probands) {
             ($row->{zyg} eq "hom") ? "HOM" : ($gene_flag{$row->{gene}} || "");
     }
 
-    # ── Write candidatos (primary + Incidental, distinguished by the GDV column) ──
-    open OUT, ">$proband.$PANEL_TAG.candidatos" or die "out: $!";
-    print OUT join("\t", @COLS), "\n";
-    for my $row (@rows) {
-        print OUT join("\t", map { $row->{data}{$_} // "" } @COLS), "\n";
-    }
-    close OUT;
+    # ── Write output ──
+    # A single-variant consult (-v / --lookup) writes ONLY the transposed,
+    # human-readable view — one "field <TAB> value" line per column, "." for
+    # empty — and echoes it to stdout; that IS the deliverable. Normal cohort
+    # runs write the TSV candidatos table + run summary as before.
+    if ($LOOKUP) {
+        my $rf = "$proband.$PANEL_TAG.readable.txt";
+        open OUT, ">", $rf or die "out: $!";
+        my $nr = 0;
+        for my $row (@rows) {
+            $nr++;
+            my $hdr = (@rows > 1) ? sprintf("──── variant %d ────\n", $nr) : "";
+            print OUT $hdr; print STDOUT $hdr;
+            for my $c (@COLS) {
+                my $v = $row->{data}{$c};
+                $v = "." if !defined $v || $v eq "";
+                printf OUT    "%-16s\t%s\n", $c, $v;
+                printf STDOUT "%-16s\t%s\n", $c, $v;
+            }
+            if (@rows > 1) { print OUT "\n"; print STDOUT "\n"; }
+        }
+        close OUT;
+        if (@rows) { print "  -> $rf (", scalar(@rows), " variant row(s))\n"; }
+        else       { print "  no reportable MANE annotation — re-run with --all-transcripts (empty $rf)\n"; }
+    } else {
+        # ── Write candidatos (primary + Incidental, distinguished by the GDV column) ──
+        open OUT, ">$proband.$PANEL_TAG.candidatos" or die "out: $!";
+        print OUT join("\t", @COLS), "\n";
+        for my $row (@rows) {
+            print OUT join("\t", map { $row->{data}{$_} // "" } @COLS), "\n";
+        }
+        close OUT;
 
-    # ── [#9] Run summary ──
-    my ($n_prim,$n_inc) = (0,0);
-    my (%by_arm,%by_inh,%by_flag);
-    for my $row (@rows) {
-        $row->{class} eq "incidental" ? $n_inc++ : $n_prim++;
-        $by_arm{$_}++ for split /;/, $row->{data}{kept_by};
-        $by_inh{$row->{data}{inheritance}}++;
-        $by_flag{$row->{data}{recessive_flag}}++ if $row->{data}{recessive_flag} ne "";
+        # ── [#9] Run summary ──
+        my ($n_prim,$n_inc) = (0,0);
+        my (%by_arm,%by_inh,%by_flag);
+        for my $row (@rows) {
+            $row->{class} eq "incidental" ? $n_inc++ : $n_prim++;
+            $by_arm{$_}++ for split /;/, $row->{data}{kept_by};
+            $by_inh{$row->{data}{inheritance}}++;
+            $by_flag{$row->{data}{recessive_flag}}++ if $row->{data}{recessive_flag} ne "";
+        }
+        print  "  -> $proband.$PANEL_TAG.candidatos\n";
+        printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
+               $stat{lines}, $stat{multiallelic}, $stat{structural}, $n_prim, $n_inc;
+        print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
+        print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
+        print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
     }
-    print  "  -> $proband.$PANEL_TAG.candidatos\n";
-    printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
-           $stat{lines}, $stat{multiallelic}, $stat{structural}, $n_prim, $n_inc;
-    print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
-    print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
-    print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
 }
 
-# ── Variant-mode cleanup: drop the annotated lookup VCF + scratch dir ──
+# ── Variant-mode cleanup: drop the annotated lookup VCF, splice scratch + tmp dir ──
 if (defined $LOOKUP_ANN) {
     if ($KEEP_VCF) {
         print "kept annotated VCF: $LOOKUP_ANN\n";
     } else {
         unlink $LOOKUP_ANN, "$LOOKUP_ANN.tbi", "$LOOKUP_ANN.csi", "${LOOKUP_ANN}_summary.html";
     }
+    (my $lbase = $LOOKUP_ANN) =~ s/\.germline\.vep\.vcf\.gz$//;
+    unlink "$lbase.$PANEL_TAG.pangolin.tsv";        # regenerable splice scratch (score is in the readable output)
     system("rm", "-rf", $LOOKUP_WORK) if defined $LOOKUP_WORK && -d $LOOKUP_WORK;
 }
 

@@ -333,14 +333,15 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' --all-transcripts   # report every tr
 perl filtering_r.pl -v 'chr17-7675088-C-T' --keep-vcf          # keep the annotated VCF
 ```
 
-Output: `lookup.<tag>.<panel>.candidatos` — `<tag>` is the variant id (`chr-pos-ref-alt`) for a
-single `-v`, else `<first-id>+<N>`. (A pre-annotated VCF can still be analyzed directly with
-`--lookup <file.germline.vep.vcf.gz>`.)
+Output: the **transposed, human-readable view only** — one `field <TAB> value` line per column
+(no TSV `.candidatos` table) — written to `lookup.<tag>.<panel>.readable.txt` and echoed to stdout.
+`<tag>` is the variant id (`chr-pos-ref-alt`) for a single `-v`, else `<first-id>+<N>`. (A
+pre-annotated VCF can still be analyzed directly with `--lookup <file.germline.vep.vcf.gz>`.)
 
 - The variant(s) are built **sites-only** (no sample), so genotype columns (zygosity/GT/DP/GQ/AB)
   are blank and `inheritance = NA`; every annotation-derived field is still computed.
 - **MANE-only** by default (use `--all-transcripts` to see all transcripts). A variant with no
-  MANE annotation yields an empty table; re-run with `--all-transcripts`.
+  MANE annotation yields an empty file; re-run with `--all-transcripts`.
 - `kept_by` lists whichever evidence arms fire (or `none`); off-panel genes get
   `Association/MOI/GDV = NA`, ACMG-SF genes get their condition + `GDV = Incidental`.
 - **Coordinates resolve 100% offline.** **HGVS** requires transcript→genomic mapping, which VEP
@@ -348,10 +349,15 @@ single `-v`, else `<first-id>+<N>`. (A pre-annotated VCF can still be analyzed d
   notation is sent (a public variant string, **never patient data**); override the endpoint with
   `$ENSEMBL_REST`. The local cache is Ensembl (not RefSeq), so use `ENST…` HGVS, not `NM_…`.
   The HGVS path needs `curl` + `jq`; the coordinate path needs neither.
-- Mechanically: build a sites-only VCF → `vep_annotate.sh` (full annotation) → report-everything
-  lookup mode. Bypasses the two-pass Pangolin bridge, so `pangolin_score` is `NA` (splice is not
-  scored for an ad-hoc variant). The annotated VCF + scratch are removed afterward unless
-  `--keep-vcf`.
+- **Splicing is scored too.** Because a single-variant consult should report *everything*,
+  `-v`/`--lookup` runs **Pangolin** on the variant inline (from the normalized annotated VCF) and
+  fills `pangolin_score` + the splice rescue arm — no separate two-pass step needed. It **degrades
+  gracefully**: if the `pangolin` conda env or references are missing, or Pangolin fails, it warns
+  and leaves `pangolin_score` blank rather than aborting. Pass **`--no-splice`** to skip it (faster,
+  and avoids the conda/GPU dependency on air-gapped hosts).
+- Mechanically: build a sites-only VCF → `vep_annotate.sh` (full annotation) → Pangolin (unless
+  `--no-splice`) → report-everything readable output. The annotated VCF + all splice scratch are
+  removed afterward unless `--keep-vcf`.
 
 ### Forcing a proband
 
