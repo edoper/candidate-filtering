@@ -72,8 +72,8 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  arms fire, else "none"). MANE-only unless --all-transcripts. Genotype columns
 #  are blank (sites-only) and inheritance = NA.
 #  Output is the TRANSPOSED, human-readable view only — one "field <TAB> value"
-#  line per column (no TSV candidatos table) — written to <name>.<panel>.readable.txt
-#  and echoed to stdout.
+#  line per column (not the TSV candidatos table) — written to
+#  Lookup.<coords>.<panel>.candidatos and echoed to stdout.
 #  Two ways in:
 #    -v/--variant '<v>'   resolve + annotate variant(s) from scratch (repeatable).
 #    --lookup <vcf.gz>    analyze a pre-annotated *.germline.vep.vcf.gz directly.
@@ -169,11 +169,13 @@ while (@ARGV) {
 my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2025.txt";
 my $custom_panel = (defined $GENES_FILE && $GENES_FILE ne "") ? 1 : 0;
 
-# Output tag = panel basename without extension (e.g. g4e-2025, Hyperparathyroidism).
+# Output tag = panel basename without extension, minus any trailing year suffix
+# (e.g. g4e-2025.txt -> g4e, Hyperparathyroidism.txt -> Hyperparathyroidism).
 # All per-run outputs are namespaced by it so different panels don't overwrite.
 my $PANEL_TAG = $PANEL;
 $PANEL_TAG =~ s{.*/}{};
 $PANEL_TAG =~ s/\.[^.]+$//;
+$PANEL_TAG =~ s/-\d{4}$//;               # drop trailing year suffix (g4e-2025 -> g4e)
 
 open PANEL, "<", $PANEL or die "gene panel '$PANEL': $!";
 my %epigenes;
@@ -619,8 +621,8 @@ sub resolve_hgvs {
 
 # Build a sites-only VCF for all requested variants and annotate it through
 # vep_annotate.sh. Returns (annotated_vcf, scratch_dir). The annotated VCF is
-# named lookup.<tag>.germline.vep.vcf.gz so lookup mode derives a clean output
-# name (lookup.<tag>.<panel>.readable.txt).
+# named Lookup.<tag>.germline.vep.vcf.gz so lookup mode derives a clean output
+# name (Lookup.<tag>.<panel>.candidatos).
 sub build_and_annotate_lookup {
     my ($vars) = @_;
     my @reqs = grep { defined && $_ ne "" } @$vars;
@@ -641,7 +643,7 @@ sub build_and_annotate_lookup {
 
     my $tag = (@ids == 1) ? $ids[0] : $ids[0] . "+" . (scalar(@ids) - 1);
     $tag =~ s/[^A-Za-z0-9._-]/_/g;
-    my $ann = "lookup.$tag.germline.vep.vcf.gz";
+    my $ann = "Lookup.$tag.germline.vep.vcf.gz";
 
     printf "[lookup] %d variant(s) -> sites-only VCF; annotating via vep_annotate.sh (this can take a few minutes) ...\n", scalar @ids;
     my $rc = system("bash vep_annotate.sh '$raw' '$ann' > '$work/annotate.log' 2>&1");
@@ -652,11 +654,11 @@ sub build_and_annotate_lookup {
 
     # Splice scoring: a single-variant consult is meant to report EVERYTHING, so
     # (unless --no-splice) run Pangolin on the variant(s) inline and drop the
-    # scores where the main loop expects them (lookup.<tag>.<panel>.pangolin.tsv).
+    # scores where the main loop expects them (Lookup.<tag>.<panel>.pangolin.tsv).
     # Degrades gracefully — a missing env/reference or a Pangolin failure just
     # leaves pangolin_score blank; it never aborts the consult.
     unless ($NO_SPLICE) {
-        my $tsv = "lookup.$tag.$PANEL_TAG.pangolin.tsv";
+        my $tsv = "Lookup.$tag.$PANEL_TAG.pangolin.tsv";
         run_pangolin_lookup($ann, $work, $tsv);
     }
     return ($ann, $work);
@@ -1262,11 +1264,12 @@ foreach my $proband (@probands) {
 
     # ── Write output ──
     # A single-variant consult (-v / --lookup) writes ONLY the transposed,
-    # human-readable view — one "field <TAB> value" line per column, "." for
-    # empty — and echoes it to stdout; that IS the deliverable. Normal cohort
-    # runs write the TSV candidatos table + run summary as before.
+    # human-readable view to Lookup.<coords>.<panel>.candidatos — one
+    # "field <TAB> value" line per column, "." for empty — and echoes it to
+    # stdout; that IS the deliverable. Normal cohort runs write the TSV
+    # candidatos table + run summary as before.
     if ($LOOKUP) {
-        my $rf = "$proband.$PANEL_TAG.readable.txt";
+        my $rf = "$proband.$PANEL_TAG.candidatos";
         open OUT, ">", $rf or die "out: $!";
         my $nr = 0;
         for my $row (@rows) {
@@ -1319,7 +1322,7 @@ if (defined $LOOKUP_ANN) {
         unlink $LOOKUP_ANN, "$LOOKUP_ANN.tbi", "$LOOKUP_ANN.csi", "${LOOKUP_ANN}_summary.html";
     }
     (my $lbase = $LOOKUP_ANN) =~ s/\.germline\.vep\.vcf\.gz$//;
-    unlink "$lbase.$PANEL_TAG.pangolin.tsv";        # regenerable splice scratch (score is in the readable output)
+    unlink "$lbase.$PANEL_TAG.pangolin.tsv";        # regenerable splice scratch (score is in the .candidatos output)
     system("rm", "-rf", $LOOKUP_WORK) if defined $LOOKUP_WORK && -d $LOOKUP_WORK;
 }
 

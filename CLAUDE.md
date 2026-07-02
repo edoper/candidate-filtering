@@ -10,7 +10,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 
 ## ⚠️ Patient data / PHI — read first
 
-- Patient VCFs and **all run outputs** (`*.candidatos`, `*.readable.txt`, `*.pangolin*`, `*_summary.html`, logs,
+- Patient VCFs and **all run outputs** (`*.candidatos`, `*.pangolin*`, `*_summary.html`, logs,
   `*.vcf.gz`/`*.cram`) are **PHI and must never be committed**.
 - `.gitignore` is an **allow-list**: it ignores `*` and then un-ignores only code + non-patient
   reference config. **Never remove the leading `*` rule.** To track a new code/config file, add
@@ -22,7 +22,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | File | Purpose |
 |------|---------|
 | `vep_annotate.sh` | Split multiallelics + Ensembl VEP (LOFTEE/REVEL/AlphaMissense/EVE/CADD + custom gnomAD v4.1 & ClinVar). → `*.germline.vep.vcf.gz` |
-| `filtering_r.pl` | The filtering algorithm (Perl, no modules). Reads annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. **All thresholds are constants at the top of this file.** Also the single-variant consult entry point (`-v`): coords/HGVS in → annotate → transposed readable view (`<name>.<panel>.readable.txt`), gates bypassed. |
+| `filtering_r.pl` | The filtering algorithm (Perl, no modules). Reads annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. **All thresholds are constants at the top of this file.** Also the single-variant consult entry point (`-v`): coords/HGVS in → annotate → transposed readable view (`Lookup.<coords>.<panel>.candidatos`), gates bypassed. |
 | `parse_pangolin.pl` | Reduce Pangolin output to per-variant `max(\|Δ\|)` splice score. |
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
 | `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
@@ -40,7 +40,7 @@ bash vep_annotate.sh EPIC280.raw.vcf.gz  EPIC280-P.germline.vep.vcf.gz
 bash vep_annotate.sh EPIC280M.raw.vcf.gz EPIC280-M.germline.vep.vcf.gz
 
 # Full pipeline (emit → Pangolin GPU scoring → final) over all *.germline.vep.vcf.gz
-bash run_filtering.sh                 # default g4e-2025 panel → EPIC280-P.g4e-2025.candidatos
+bash run_filtering.sh                 # default g4e-2025 panel → EPIC280-P.g4e.candidatos
 bash run_filtering.sh my_genes.txt    # custom genes-of-interest list (forwarded to both passes)
 
 # Filtering only (no Pangolin)

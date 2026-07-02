@@ -286,7 +286,7 @@ bash vep_annotate.sh EPIC280M.raw.vcf.gz   EPIC280-M.germline.vep.vcf.gz
 
 # 2) Run the full filtering pipeline (emit → Pangolin → final)
 bash run_filtering.sh
-#    → EPIC280-P.g4e-2025.candidatos
+#    → EPIC280-P.g4e.candidatos
 ```
 
 ### Custom gene list (genes of interest)
@@ -306,7 +306,7 @@ perl filtering_r.pl -l my_genes.txt       # filtering only
   If a custom gene has recessive forms, supply its MOI (column 3 = `AR`) to get the
   recessive threshold, or relax `$FREQ_AD`.
 - Outputs are **namespaced by panel** (`<proband>.<panel>.candidatos`, where `<panel>` is the
-  panel-file basename, e.g. `EPIC280-P.g4e-2025.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
+  panel-file basename with any trailing year dropped, e.g. `EPIC280-P.g4e.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
   so different gene lists produce **side-by-side** results instead of overwriting. Pangolin
   scratch is namespaced the same way but deleted after each run (see [Splice scoring](#splice-scoring-pangolin)).
 
@@ -334,7 +334,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' --keep-vcf          # keep the annota
 ```
 
 Output: the **transposed, human-readable view only** — one `field <TAB> value` line per column
-(no TSV `.candidatos` table) — written to `lookup.<tag>.<panel>.readable.txt` and echoed to stdout.
+(the transposed view, not the TSV cohort table) — written to `Lookup.<tag>.<panel>.candidatos` and echoed to stdout.
 `<tag>` is the variant id (`chr-pos-ref-alt`) for a single `-v`, else `<first-id>+<N>`. (A
 pre-annotated VCF can still be analyzed directly with `--lookup <file.germline.vep.vcf.gz>`.)
 
