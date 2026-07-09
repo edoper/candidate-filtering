@@ -77,6 +77,18 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   place for debugging.
 - **gnomAD AC=0/AN=0 means "absent from gnomAD"** (sites-only VCF), NOT an uncallable region —
   never cite AN=0 as artifact evidence.
+- **Cohort recurrent-artifact filter (internal panel-of-normals):** when a real cohort is
+  auto-analyzed together (≥ `$COHORT_MIN`=10 probands), a candidate carried by ≥ `$COHORT_MAX_FRAC`=25%
+  of the cohort **and** absent from gnomAD (AF < `$COHORT_ART_FREQ`=0.01%) is dropped as a systematic
+  technical artifact (paralog/low-complexity mismapping — e.g. the recurrent SYNE1/KMT2C sites).
+  **Both** conditions are required: recurrence alone would hit founder alleles, but a true population
+  bottleneck / under-represented ancestry allele carries a gnomAD footprint (gnomAD's large
+  Admixed-American sample), so requiring gnomAD-absence keeps it founder-safe. Every drop is logged
+  (`cohort_artifact drop:` lines + a per-proband count). **OFF** for single-variant (`-v`/`--lookup`),
+  forced/single proband (`--proband`), and any run of < 10 probands — there's no cohort to compare
+  against. **Override:** `--keep-cohort-artifacts` (or env `KEEP_COHORT_ARTIFACTS=1`) keeps them
+  tagged `qc_flag=cohort_artifact` instead of dropping (for founder-enriched cohorts: review the drop
+  log — a genuinely private founder allele would surface there). Self-test: `perl filtering_r.pl --selftest-cohort`.
 - **Recessive carrier drop:** a solitary het in an AR/XLR gene that is not biallelic (neither HOM
   nor comp-het) is dropped. The permissive `$FREQ_AR`=1% gate only helps variants that pair up.
   **Override:** `--keep-ar-carriers` (or env `KEEP_AR_CARRIERS=1`) keeps solitary AR carrier hets

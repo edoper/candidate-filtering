@@ -50,6 +50,13 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    direction-conflict veto, mapped to the 2015 strength tiers (BP4_Moderate ->
 #    supporting-benign, as 2015 has no benign-Moderate). Other criteria: PVS1,
 #    PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.                            [#2]
+#  * Cohort recurrent-artifact filter (internal panel-of-normals): for a real
+#    cohort auto-analyzed together (>= $COHORT_MIN probands), a candidate carried by
+#    >= $COHORT_MAX_FRAC of samples AND absent from gnomAD (AF < $COHORT_ART_FREQ) is
+#    a systematic technical artifact (paralog/low-complexity mismapping) and is
+#    dropped — both conditions required, so population bottlenecks / founder alleles
+#    (which carry a gnomAD footprint) are preserved. OFF for single-variant, forced/
+#    single-proband, and small runs. --keep-cohort-artifacts keeps+tags instead. [#11]
 #  * QC / artifact flags (qc_flag): lowDP, lowGQ, AB_het/AB_hom, homopolymer
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
@@ -95,6 +102,26 @@ my $REVEL_MIN  = 0.644;  # REVEL rescue threshold (ClinGen PP3)
 my $AM_MIN     = 0.792;  # AlphaMissense pathogenicity rescue threshold
 my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 
+# ── Cohort recurrent-artifact filter (internal panel-of-normals) [#11] ──
+# Systematic technical artifacts — reference/mapping errors in paralog-rich or
+# low-complexity genes (e.g. SYNE1, KMT2C) — recur across a large fraction of a
+# cohort yet are ABSENT from gnomAD. That combination is the discriminator: a
+# population bottleneck or an under-represented ancestry CANNOT produce it, because
+# a real founder allele frequent enough to reach a quarter of the cohort would
+# leave a footprint in gnomAD's large Admixed-American sample. So a variant is
+# dropped ONLY when it is BOTH cohort-recurrent (>= $COHORT_MAX_FRAC of samples) AND
+# gnomAD-absent (AF < $COHORT_ART_FREQ). Neither condition alone drops anything.
+# Activates ONLY for a real cohort auto-analyzed together (>= $COHORT_MIN probands,
+# no forced selection): single-variant (-v/--lookup) and single/forced-proband
+# (--proband) runs never activate it, and trios/duos/small runs are untouched
+# (a per-variant or per-proband consult has no cohort to compare against). Logged;
+# --keep-cohort-artifacts (env KEEP_COHORT_ARTIFACTS=1) keeps them instead, tagged
+# qc_flag=cohort_artifact — for a founder-enriched cohort, review the drop log, as a
+# genuinely private founder allele would surface there.
+my $COHORT_MIN      = 10;    # min cohort size to activate the filter (below -> OFF)
+my $COHORT_MAX_FRAC = 0.25;  # carried by >= this fraction of the cohort -> "recurrent"
+my $COHORT_ART_FREQ = 0.01;  # gnomAD AF (%) below this -> "absent from gnomAD" (1 in 10,000)
+
 # Ensembl REST endpoint for HGVS->coordinate recoding in -v/-l variant mode
 # (override with $ENSEMBL_REST; point at a private mirror on an air-gapped host).
 my $ENSEMBL_REST = $ENV{ENSEMBL_REST} // 'https://rest.ensembl.org';
@@ -128,6 +155,10 @@ my $BP4_REVEL   = 0.290;   # REVEL at/below -> BP4 (computational benign, ClinGe
 # Reference hashes
 #############################################################################
 
+# Cohort recurrent-artifact self-test (synthetic VCFs; no annotation stack needed).
+#   perl filtering_r.pl --selftest-cohort
+run_cohort_selftest() if grep { $_ eq '--selftest-cohort' } @ARGV;
+
 open MANE, "<mane-plus-clinical-names.txt" or die "mane: $!";
 my %mane;
 while (my $m = <MANE>) { chomp $m; my ($a,$b) = split /\t/, $m; $mane{$a} = $b; }
@@ -152,9 +183,13 @@ my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
 # manual review (a possible missed second hit: deep-intronic, CNV) — as the EPIGEN paper
 # did. Env KEEP_AR_CARRIERS=1 or CLI --keep-ar-carriers. Kept rows are tagged AR_carrier.
 my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
+# Keep (don't drop) cohort recurrent-artifact variants, tagging them qc_flag=
+# cohort_artifact instead. Env KEEP_COHORT_ARTIFACTS=1 or CLI --keep-cohort-artifacts.
+my $KEEP_COHORT_ARTIFACTS = $ENV{KEEP_COHORT_ARTIFACTS} ? 1 : 0;
 while (@ARGV) {
     my $a = shift @ARGV;
     if    ($a eq '--keep-ar-carriers')      { $KEEP_AR_CARRIERS = 1; }
+    elsif ($a eq '--keep-cohort-artifacts') { $KEEP_COHORT_ARTIFACTS = 1; }
     elsif ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
     elsif ($a =~ /^--proband=(.+)$/)        { push @force_probands, $1; }
     elsif ($a eq '--lookup')                { $LOOKUP = 1; $LOOKUP_FILE = (shift @ARGV // ''); }
@@ -169,7 +204,8 @@ while (@ARGV) {
     else {
         die "unknown argument: '$a'\n".
             "  set the candidate-gene panel with  -l/--list FILE  (no positional form);\n".
-            "  a single variant with  -v/--variant '<v>' , a pre-annotated VCF with  --lookup FILE.\n";
+            "  a single variant with  -v/--variant '<v>' , a pre-annotated VCF with  --lookup FILE;\n".
+            "  keep recessive carriers with  --keep-ar-carriers , cohort artifacts with  --keep-cohort-artifacts.\n";
     }
 }
 my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2025.txt";
@@ -337,6 +373,49 @@ sub load_scores {
     while (my $l = <$fh>) { chomp $l; my ($id,$v) = split /\t/, $l; $s{$id} = $v if defined $v; }
     close $fh;
     return \%s;
+}
+
+# ── Cohort recurrent-artifact tally (internal panel-of-normals) [#11] ──
+# Scan every cohort VCF once (GENOTYPES ONLY — no CSQ parse, so it is cheap) and
+# count, per chr-pos-ref-alt, how many distinct samples carry the ALT plus their
+# zygosity breakdown. Returns (\%carriers, \%hom, \%het, $n_samples). Sites-only
+# files (no sample column) contribute no carriers. Used only for large cohorts
+# (see $COHORT_MIN); never called in lookup / single-proband runs.
+sub build_cohort_tally {
+    my ($files) = @_;
+    my (%ac, %hom, %het);
+    my $n = 0;
+    for my $f (@$files) {
+        next unless defined $f && -e $f;
+        $n++;
+        my $fh = open_vcf($f);
+        while (my $line = <$fh>) {
+            next if $line =~ /^#/;
+            chomp $line;                           # else the last field keeps its newline
+            my @c = split /\t/, $line;
+            next unless @c >= 10;                  # need FORMAT + >=1 sample column
+            my ($chr,$pos,$ref,$alt,$fmt,$smp) = @c[0,1,3,4,8,9];
+            next if $alt =~ /,/;                    # pre-split; skip residual multiallelic
+            my ($gt) = parse_call($fmt,$smp);
+            my $z = zygosity($gt);
+            next unless $z eq "het" || $z eq "hom";
+            my $id = "$chr-$pos-$ref-$alt";
+            $ac{$id}++;
+            $z eq "hom" ? $hom{$id}++ : $het{$id}++;
+        }
+        close $fh;
+    }
+    return (\%ac, \%hom, \%het, $n);
+}
+
+# Pure artifact decision: carried by >= $COHORT_MAX_FRAC of the cohort AND gnomAD
+# AF (%) below $COHORT_ART_FREQ, with the cohort large enough (>= $COHORT_MIN) to be
+# meaningful. Kept pure (no I/O) so run_cohort_selftest can exercise it directly.
+sub cohort_artifact_call {
+    my ($ac, $n, $freq) = @_;
+    return 0 unless defined $n && $n >= $COHORT_MIN;
+    $ac ||= 0;
+    return (($ac / $n) >= $COHORT_MAX_FRAC && $freq < $COHORT_ART_FREQ) ? 1 : 0;
 }
 
 # Is a consequence whitelisted? Pass if ANY '&'-separated atom is in the list.
@@ -787,6 +866,56 @@ sub run_naming_selftest {
     exit($fail ? 1 : 0);
 }
 
+# Self-test of the cohort recurrent-artifact filter [#11] — builds a synthetic
+# 12-sample cohort of tiny sites+GT VCFs (no VEP/reference files needed), then
+# checks the carrier tally and the drop decision, including the founder-safety
+# guard (recurrent-but-in-gnomAD is KEPT) and the small-cohort guard (N<min = off).
+sub run_cohort_selftest {
+    print "cohort recurrent-artifact self-test\n";
+    my @ok;
+    my $is = sub {
+        my ($got,$want,$msg) = @_;
+        my $pass = ($got eq $want);
+        printf "  [%s] %-38s got=%s want=%s\n", $pass ? "PASS" : "FAIL", $msg, $got, $want;
+        push @ok, $pass;
+    };
+
+    my $dir = qx(mktemp -d); chomp $dir;
+    die "cohort self-test: mktemp failed\n" unless $dir ne "" && -d $dir;
+    my $hdr = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n";
+    # 12-sample cohort:
+    #   ART_HOM  chr1-100-A-G : hom  in samples 1..6  (6/12 = 50%)  -> recurrent artifact
+    #   ART_HET  chr2-200-C-T : het  in samples 1..12 (12/12 = 100%) -> recurrent artifact
+    #   REAL     chr3-300-G-A : het  in samples 1..2  (2/12 = 17%)  -> not recurrent
+    for my $s (1..12) {
+        open my $vh, ">", "$dir/S$s.vcf" or die "cohort self-test: $!";
+        print $vh $hdr;
+        print $vh "chr1\t100\t.\tA\tG\t.\t.\t.\tGT\t1/1\n" if $s <= 6;
+        print $vh "chr2\t200\t.\tC\tT\t.\t.\t.\tGT\t0/1\n";
+        print $vh "chr3\t300\t.\tG\tA\t.\t.\t.\tGT\t0/1\n" if $s <= 2;
+        close $vh;
+    }
+    my @files = sort glob("$dir/*.vcf");
+    my ($ac,$hom,$het,$n) = build_cohort_tally(\@files);
+    $is->($n,                            12, "cohort size N");
+    $is->($ac->{"chr1-100-A-G"}  // 0,    6, "ART_HOM carriers");
+    $is->($hom->{"chr1-100-A-G"} // 0,    6, "ART_HOM all homozygous");
+    $is->($het->{"chr1-100-A-G"} // 0,    0, "ART_HOM no hets");
+    $is->($ac->{"chr2-200-C-T"}  // 0,   12, "ART_HET carriers");
+    $is->($ac->{"chr3-300-G-A"}  // 0,    2, "REAL carriers");
+    # Drop decision (gnomAD AF is a percentage, matching the main loop's $freq).
+    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 0.0),  1, "ART_HOM dropped (recurrent+absent)");
+    $is->(cohort_artifact_call($ac->{"chr2-200-C-T"}, $n, 0.0),  1, "ART_HET dropped (recurrent+absent)");
+    $is->(cohort_artifact_call($ac->{"chr3-300-G-A"}, $n, 0.0),  0, "REAL kept (not recurrent)");
+    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 0.5),  0, "recurrent but in gnomAD -> kept (founder-safe)");
+    $is->(cohort_artifact_call(6, 8, 0.0),                       0, "small cohort (N<min) -> filter off");
+    system("rm","-rf",$dir);
+
+    my $fail = grep { !$_ } @ok;
+    print $fail ? "cohort self-test: $fail FAILED\n" : "cohort self-test: all ".scalar(@ok)." passed\n";
+    exit($fail ? 1 : 0);
+}
+
 my @files = glob $INPUT_GLOB;
 my %file_for;
 for my $f (@files) { (my $s = $f) =~ s/\.germline\.vep\.vcf\.gz$//; $file_for{$s} = $f; }
@@ -871,6 +1000,14 @@ my @COLS = qw(
     Association MOI GDV
 );
 
+# Cohort recurrent-artifact state [#11] — built lazily on the first FINAL-pass
+# proband (see below), and only for a real cohort auto-analyzed together. A single
+# variant (-v/--lookup), a forced/single proband (--proband), or a run of fewer than
+# $COHORT_MIN probands has no cohort to compare against, so the filter stays OFF.
+my ($cohort_ac,$cohort_hom,$cohort_het,$cohort_n) = ({},{},{},0);
+my $cohort_on    = 0;
+my $cohort_built = 0;
+
 #############################################################################
 # Process each proband
 #############################################################################
@@ -887,6 +1024,28 @@ foreach my $proband (@probands) {
     my $tsv   = "$proband.$PANEL_TAG.pangolin.tsv";
     my $final = $LOOKUP ? 1 : -e $tsv;          # lookup reports immediately (no 2-pass)
     my $pscore = (-e $tsv) ? load_scores($tsv) : {};
+
+    # ── [#11] Build the cohort recurrent-artifact tally once, on the first FINAL-pass
+    #    proband. Gated to a real cohort auto-analyzed together: OFF for lookup, for a
+    #    forced/single proband (--proband), and for runs of < $COHORT_MIN probands. ──
+    if ($final && !$LOOKUP && !$cohort_built) {
+        $cohort_built = 1;
+        my $eligible = (!@force_probands && @probands >= $COHORT_MIN && @files >= $COHORT_MIN);
+        if ($eligible) {
+            ($cohort_ac,$cohort_hom,$cohort_het,$cohort_n) = build_cohort_tally(\@files);
+            $cohort_on = ($cohort_n >= $COHORT_MIN) ? 1 : 0;
+        }
+        if ($cohort_on) {
+            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d%% of cohort AND gnomAD AF <%s%%%s\n",
+                   $cohort_n, int($COHORT_MAX_FRAC*100 + 0.5), $COHORT_ART_FREQ,
+                   $KEEP_COHORT_ARTIFACTS ? " (keep+tag mode)" : "";
+        } else {
+            printf "cohort artifact filter: OFF — %s\n",
+                   (@force_probands ? "forced/single proband (--proband)"
+                    : @probands < $COHORT_MIN ? "only ".scalar(@probands)." proband(s); need >=$COHORT_MIN"
+                    : "cohort too small");
+        }
+    }
 
     my $kind = ($have_m && $have_f) ? "trio" : ($have_m||$have_f) ? "duo" : "singleton";
     my $final_desc = $final ? ((-e $tsv) ? "FINAL: splice scores from $tsv" : "FINAL: no splice scores")
@@ -939,10 +1098,11 @@ foreach my $proband (@probands) {
     if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
 
     # Run statistics [#9].
-    my %stat = (lines=>0, multiallelic=>0, structural=>0);
+    my %stat = (lines=>0, multiallelic=>0, structural=>0, cohort_dropped=>0);
 
     my %emit;            # EMIT pass: unique candidate variants
     my @rows;            # FINAL pass: buffered rows (for per-gene recessive logic)
+    my %cohort_seen;     # [#11] vid -> 1 once dropped/logged (avoid double-counting)
 
     my $pfh = open_vcf($pfile);
     while (my $v = <$pfh>) {
@@ -1204,6 +1364,28 @@ foreach my $proband (@probands) {
             push @qc, "DN_unconfirmed" if $inheritance =~ /^DN/;   # no parental ref depth
             my $qc_flag = join(";", @qc);
 
+            # ── [#11] Cohort recurrent-artifact filter (internal panel-of-normals) ──
+            # Drop a candidate that is BOTH cohort-recurrent AND gnomAD-absent (a
+            # systematic technical artifact; a founder allele would have a gnomAD
+            # footprint). --keep-cohort-artifacts keeps it, tagged qc_flag instead.
+            if ($cohort_on) {
+                my $cac = $cohort_ac->{$my_id} // 0;
+                if (cohort_artifact_call($cac, $cohort_n, $freq)) {
+                    if ($KEEP_COHORT_ARTIFACTS) {
+                        push @qc, "cohort_artifact";
+                        $qc_flag = join(";", @qc);
+                    } else {
+                        unless ($cohort_seen{$my_id}++) {
+                            $stat{cohort_dropped}++;
+                            printf "  cohort_artifact drop: %-28s %-10s carriers=%d/%d (hom=%d het=%d) gnomAD_af=%.5f%%\n",
+                                   $my_id, ($gene ne "" ? $gene : "."), $cac, $cohort_n,
+                                   ($cohort_hom->{$my_id} // 0), ($cohort_het->{$my_id} // 0), $freq;
+                        }
+                        next;   # drop this candidate row
+                    }
+                }
+            }
+
             # ── [#2] Automated ACMG/AMP classification (triage) ──
             my $gt_susp = grep { /^(lowDP|lowGQ|AB_)/ } @qc;   # GT/DP suspicious?
             my ($acmg_class,$acmg_crit) = acmg_classify(
@@ -1348,6 +1530,9 @@ foreach my $proband (@probands) {
         print  "  -> $proband.$PANEL_TAG.candidatos\n";
         printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
                $stat{lines}, $stat{multiallelic}, $stat{structural}, $n_prim, $n_inc;
+        printf "  cohort_artifact: %d variant(s) dropped (recurrent in >=%d%% of cohort & gnomAD-absent)\n",
+               $stat{cohort_dropped}, int($COHORT_MAX_FRAC*100 + 0.5)
+            if $cohort_on && !$KEEP_COHORT_ARTIFACTS && $stat{cohort_dropped};
         print  "  kept_by:     ", join(", ", map { "$_=$by_arm{$_}" } sort keys %by_arm), "\n" if %by_arm;
         print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
         print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;

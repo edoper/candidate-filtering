@@ -140,8 +140,37 @@ All thresholds are single constants at the top of `filtering_r.pl`.
     ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
     plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
+### Stage 3 — Cohort recurrent-artifact filter (internal panel-of-normals)
+
+When a **real cohort** is auto-analyzed together (≥ `$COHORT_MIN` = 10 probands), the pipeline
+builds an internal *panel of normals*: a one-pass genotype tally (no CSQ, so it is cheap) over all
+input samples counting, per `chr-pos-ref-alt`, how many carry the ALT and their zygosity breakdown.
+A candidate is then **dropped** when it is **both**:
+
+1. **cohort-recurrent** — carried by ≥ `$COHORT_MAX_FRAC` (25%) of the cohort, and
+2. **gnomAD-absent** — gnomAD AF < `$COHORT_ART_FREQ` (0.01%, i.e. ~1 in 10,000).
+
+This targets systematic technical artifacts — reference/mapping errors in paralog-rich or
+low-complexity genes (e.g. the recurrent `SYNE1` / `KMT2C` sites that appear, gnomAD-absent, in a
+large fraction of a cohort). **Both conditions are required, and that conjunction is the
+discriminator:** recurrence alone would remove true **founder / bottleneck** alleles, but a real
+founder allele frequent enough to reach a quarter of the cohort leaves a footprint in gnomAD's large
+Admixed-American sample — so requiring gnomAD-absence keeps the filter founder-safe (important for
+under-represented ancestries). Every drop is logged (`cohort_artifact drop:` lines with carrier
+count + hom/het breakdown, and a per-proband total).
+
+- **OFF** for single-variant (`-v` / `--lookup`), forced/single proband (`--proband`), and any run of
+  fewer than `$COHORT_MIN` probands — a per-variant or per-proband consult has no cohort to compare
+  against.
+- **`--keep-cohort-artifacts`** (or env `KEEP_COHORT_ARTIFACTS=1`) keeps them, tagged
+  `qc_flag=cohort_artifact`, instead of dropping — for a founder-enriched cohort, review the drop log
+  (a genuinely private founder allele would surface there and can be kept this way).
+- Self-test (synthetic cohort, no reference files needed): `perl filtering_r.pl --selftest-cohort`.
+- Thresholds are the `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ` constants at the top of
+  `filtering_r.pl`.
+
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
-/ candidates) and breakdowns by `kept_by` and inheritance.
+/ candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
 
 ### Output columns (`<proband>.<panel>.candidatos`, TSV)
 
@@ -214,7 +243,8 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
   `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
   `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
-  `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`.
+  `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `cohort_artifact` (recurrent
+  gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped).
 - **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
   sites), so de-novo cannot be confirmed from parental coverage — `DN` rows are flagged
   `DN_unconfirmed`. Inherited rows instead get `inh_lowqual` when the parental call is low quality.
@@ -402,7 +432,9 @@ proband writes its own `<name>.<panel>.candidatos`, so forcing one does not over
 | `PANGOLIN_DB` | `$HOME/vep_refs/pangolin/gencode.v38.annotation.db` |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
-`$SPLICE_MIN`) are edited directly in `filtering_r.pl`.
+`$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ`) are
+edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
+`--keep-cohort-artifacts` / `KEEP_COHORT_ARTIFACTS` toggle the two drop rules.
 
 ---
 
@@ -417,6 +449,11 @@ Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MI
 - Compound-het *trans* confirmation needs a full trio; duos report `CompHet?`.
 - De-novo calls rely on parent VCF genotypes; a parental no-call (uncovered site) can
   masquerade as de novo — verify against parental depth before reporting.
+- The **cohort recurrent-artifact filter** drops variants that are simultaneously cohort-recurrent and
+  gnomAD-absent (Stage 3). It is deliberately conservative (both conditions, high 25% threshold) so
+  founder / bottleneck alleles — which carry a gnomAD footprint — are preserved. For a strongly
+  founder-enriched cohort where a *private* founder allele could plausibly reach 25% while being
+  gnomAD-absent, review the per-run drop log or run with `--keep-cohort-artifacts`.
 - This is a **triage tool to feed manual curation**, not an automated classifier.
 
 ## Data privacy
