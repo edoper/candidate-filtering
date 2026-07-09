@@ -53,6 +53,13 @@ sample as a proband, and pairs it with its `-M`/`-F` parents. A name not ending 
 `-P`/`-M`/`-F` is ignored by auto-discovery (still usable via `--proband`). The discovery
 logic has a built-in self-test: `perl filtering_r.pl --selftest`.
 
+> **Singleton cohorts (no family structure):** if the inputs carry **no** `-P`/`-M`/`-F`
+> suffixes at all (e.g. `EPIGEN01…20.germline.vep.vcf.gz`), auto-discovery would find zero
+> probands — so a **singleton fallback** kicks in and analyzes **every** sample as a standalone
+> proband (`inheritance = NA`), printing a `NOTE:` to that effect. This means a plainly-named
+> singleton cohort "just works" with no `--proband` needed. (To force trio/duo analysis, name
+> files with the `-P`/`-M`/`-F` convention or pass `--proband`.)
+
 It is a two-pass design — if the Pangolin score map is missing it emits the candidate list
 and stops; once scores exist it produces the final table.
 
@@ -109,6 +116,7 @@ column records which fired.
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
+| AR_hom | **Homozygous, protein-altering** (missense / inframe / stop_lost / start_lost) variant in a **recessive (AR/XLR) panel gene**, with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support — biallelic zygosity in a recessive disease gene *is* the evidence. Catches phenotype-driven recessive diagnoses (e.g. a homozygous `ALDH7A1` missense causing pyridoxine-dependent epilepsy) whose predictor scores fall below the CADD/AM/REVEL thresholds. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
 

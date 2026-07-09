@@ -802,6 +802,22 @@ if (@force_probands) {
         push @probands, $r->{proband};
         $parents_of{$r->{proband}} = { m => $r->{mother}, f => $r->{father} };
     }
+    # Singleton fallback: auto-discovery keys on the -P/-M/-F role suffix. If NO family
+    # structure is found but samples exist, treat every sample as a standalone proband
+    # (parents still auto-linked if -M/-F siblings happen to exist). Prevents a SILENT
+    # 0-candidatos run on cohorts named without role suffixes (e.g. EPIGEN01..20). Only
+    # fires when discovery found nothing, so trio/duo runs are unaffected.
+    if (!@probands && keys %file_for && !$LOOKUP && !@VARIANTS) {
+        warn "NOTE: no -P/-M/-F family structure found; analyzing all "
+           . (scalar keys %file_for) . " sample(s) as singleton probands "
+           . "(inheritance=NA; use -P/-M/-F names or --proband for trio/duo analysis).\n";
+        for my $p (sort keys %file_for) {
+            push @probands, $p;
+            (my $fam = $p) =~ s/-P$//;
+            $parents_of{$p} = { m => (exists $file_for{"$fam-M"} ? "$fam-M" : undef),
+                                f => (exists $file_for{"$fam-F"} ? "$fam-F" : undef) };
+        }
+    }
 }
 
 # ── Variant entry point (-v / -l): build + annotate, then enter lookup mode ──
@@ -1073,6 +1089,16 @@ foreach my $proband (@probands) {
                 push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
                 push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
                 push @kept, $aa_crit   if $aa_crit;   # PS1/PM5 (ClinVar amino-acid evidence)
+                # AR_hom: a HOMOZYGOUS rare MANE *protein-altering* variant (missense / inframe /
+                # stop_lost / start_lost) in a recessive (AR/XLR) panel gene is rescued even without
+                # in-silico/ClinVar support. Catches phenotype-driven recessive diagnoses (e.g. ALDH7A1
+                # p.Thr222Ala hom) that the predictor thresholds miss. Restricted to coding changes so it
+                # does NOT flood on benign homozygous intronic/polypyrimidine variants (those go through
+                # the Pangolin splice arm; truncating LoF goes through the LoF arm). Already rare (AR freq
+                # gate), MANE, in-panel by this point. BS1/BS2/BA1 flags annotate benign-leaning ones.
+                push @kept, "AR_hom"   if ($p_moi // "") =~ /\bAR\b|XLR|recessiv/i && $zyg eq "hom"
+                                          && $consequence =~ /missense|inframe|stop_lost|start_lost|protein_altering/
+                                          && $ab ne "" && $ab > 0.75;   # clean hom call (guards against false-hom/artifact; AB~1.0 expected)
                 if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
             }
 

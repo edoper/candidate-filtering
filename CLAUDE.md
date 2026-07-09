@@ -64,6 +64,9 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
 - **Role-suffix filename convention** drives family auto-discovery: `<FAMILY>-P/-M/-F`. Globs
   `*.germline.vep.vcf.gz`, groups by `<FAMILY>` prefix, analyzes each `-P` as proband. A name
   not ending in `-P/-M/-F` is ignored by discovery (still usable via `--proband`).
+  **Singleton fallback:** if NO input has a `-P/-M/-F` suffix (e.g. `EPIGEN01..20`), discovery finds
+  0 probands → it auto-analyzes **every** sample as a singleton proband (prints a `NOTE:`). So plainly-named
+  singleton cohorts work without `--proband`. (Historically this silently produced 0 candidatos.)
 - **Two-pass design:** if the Pangolin score map is absent, pass 1 emits the candidate list and
   stops; once scores exist, pass 2 writes the final table. `run_filtering.sh` does both.
 - **Annotations resolved by name** from the CSQ header — no hard-coded column indices.
@@ -76,6 +79,12 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   never cite AN=0 as artifact evidence.
 - **Recessive carrier drop:** a solitary het in an AR/XLR gene that is not biallelic (neither HOM
   nor comp-het) is dropped. The permissive `$FREQ_AR`=1% gate only helps variants that pair up.
+- **AR_hom rescue arm:** a **homozygous, protein-altering** (missense/inframe/stop_lost/start_lost) rare
+  MANE variant in a recessive (AR/XLR) panel gene **with AB > 0.75** is kept even with no predictor/ClinVar
+  support (`kept_by=AR_hom`) — biallelic zygosity in a recessive disease gene is the evidence. Catches
+  phenotype-driven recessive diagnoses (e.g. homozygous `ALDH7A1` p.Thr222Ala) below CADD/AM/REVEL thresholds.
+  **Coding-only** (intronic/splice → Pangolin arm; LoF → LoF arm) and **AB>0.75** (guards false-hom) keep it
+  specific — else it floods on benign homozygous polypyrimidine/intron variants. `BS1/BS2/BA1` still flag benign.
 - **ACMG output is triage-grade**, not a final clinical call (PM1/PP2 not assessed; PVS1 doesn't
   verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching). PM5 also fires for a
   single-codon in-frame deletion when a P/LP missense exists at the deleted residue (curatorial
