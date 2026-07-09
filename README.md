@@ -116,7 +116,7 @@ column records which fired.
 | ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
-| AR_hom | **Homozygous, protein-altering** (missense / inframe / stop_lost / start_lost) variant in a **recessive (AR/XLR) panel gene**, with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support — biallelic zygosity in a recessive disease gene *is* the evidence. Catches phenotype-driven recessive diagnoses (e.g. a homozygous `ALDH7A1` missense causing pyridoxine-dependent epilepsy) whose predictor scores fall below the CADD/AM/REVEL thresholds. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
+| AR_hom | **Homozygous, protein-altering** (missense / inframe / stop_lost / start_lost) variant in a **recessive (AR/XLR) panel gene**, with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
 
@@ -132,6 +132,13 @@ All thresholds are single constants at the top of `filtering_r.pl`.
   not biallelic (neither `HOM` nor comp-het) is **dropped** — g4e reports no carriers. The
   relaxed `$FREQ_AR` rarity gate is thus only useful for variants that pair into a biallelic
   genotype. Same rule applies to recessive ACMG SF genes (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
+  - **`--keep-ar-carriers`** (or env `KEEP_AR_CARRIERS=1`) **keeps** solitary AR/XLR carrier hets
+    instead of dropping them, tagged `recessive_flag=AR_carrier`. Use it to surface a single rare,
+    damaging AR allele for manual review — the exome may miss the second hit (deep-intronic variant,
+    CNV, regulatory), so a carrier of a strong allele in a phenotype-matching gene can be worth a
+    second look (as clinical candidate lists often include). Off by default (avoids carrier noise).
+    ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
+    plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates) and breakdowns by `kept_by` and inheritance.

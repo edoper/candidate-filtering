@@ -147,9 +147,15 @@ print "hash mane, listo!\n";
 #   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
 my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
 my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
+# Keep solitary het carriers in recessive (AR/XLR) genes instead of dropping them
+# (default = drop). Useful when you want single rare/damaging AR alleles surfaced for
+# manual review (a possible missed second hit: deep-intronic, CNV) — as the EPIGEN paper
+# did. Env KEEP_AR_CARRIERS=1 or CLI --keep-ar-carriers. Kept rows are tagged AR_carrier.
+my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
 while (@ARGV) {
     my $a = shift @ARGV;
-    if    ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
+    if    ($a eq '--keep-ar-carriers')      { $KEEP_AR_CARRIERS = 1; }
+    elsif ($a eq '--proband' || $a eq '-p') { push @force_probands, (shift @ARGV // ''); }
     elsif ($a =~ /^--proband=(.+)$/)        { push @force_probands, $1; }
     elsif ($a eq '--lookup')                { $LOOKUP = 1; $LOOKUP_FILE = (shift @ARGV // ''); }
     elsif ($a =~ /^--lookup=(.+)$/)         { $LOOKUP = 1; $LOOKUP_FILE = $1; }
@@ -1091,11 +1097,14 @@ foreach my $proband (@probands) {
                 push @kept, $aa_crit   if $aa_crit;   # PS1/PM5 (ClinVar amino-acid evidence)
                 # AR_hom: a HOMOZYGOUS rare MANE *protein-altering* variant (missense / inframe /
                 # stop_lost / start_lost) in a recessive (AR/XLR) panel gene is rescued even without
-                # in-silico/ClinVar support. Catches phenotype-driven recessive diagnoses (e.g. ALDH7A1
-                # p.Thr222Ala hom) that the predictor thresholds miss. Restricted to coding changes so it
-                # does NOT flood on benign homozygous intronic/polypyrimidine variants (those go through
-                # the Pangolin splice arm; truncating LoF goes through the LoF arm). Already rare (AR freq
-                # gate), MANE, in-panel by this point. BS1/BS2/BA1 flags annotate benign-leaning ones.
+                # in-silico/ClinVar support. Rationale (general, not case-specific): a biallelic
+                # (homozygous) genotype in a recessive disease gene is itself pathogenicity evidence
+                # under recessive inheritance, independent of missense predictors — which are calibrated
+                # largely on dominant/heterozygous effects and can miss true recessive alleles. Restricted
+                # to coding changes so it does NOT flood on benign homozygous intronic/polypyrimidine
+                # variants (those go through the Pangolin splice arm; truncating LoF through the LoF arm);
+                # AB>0.75 guards against false-hom calls. Already rare (AR freq gate), MANE, in-panel by
+                # this point. BS1/BS2/BA1 flags still annotate benign-leaning ones for the curator.
                 push @kept, "AR_hom"   if ($p_moi // "") =~ /\bAR\b|XLR|recessiv/i && $zyg eq "hom"
                                           && $consequence =~ /missense|inframe|stop_lost|start_lost|protein_altering/
                                           && $ab ne "" && $ab > 0.75;   # clean hom call (guards against false-hom/artifact; AB~1.0 expected)
@@ -1278,14 +1287,19 @@ foreach my $proband (@probands) {
     }
     # Recessive genes (g4e primary AR + ACMG SF AR): report biallelic only (hom or
     # comp-het); drop solitary carriers. g4e wants no carriers at all [#6].
+    # --keep-ar-carriers / KEEP_AR_CARRIERS=1 keeps them instead (tagged AR_carrier below).
     @rows = grep {
         my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
         !( ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic )
-    } @rows unless $LOOKUP;   # lookup keeps solitary carriers (report everything)
+    } @rows unless $LOOKUP || $KEEP_AR_CARRIERS;   # lookup / keep-carriers: report everything
 
     for my $row (@rows) {
+        my $biallelic = ($row->{zyg} eq "hom" || ($gene_flag{$row->{gene}} || "") =~ /CompHet/);
         $row->{data}{recessive_flag} =
-            ($row->{zyg} eq "hom") ? "HOM" : ($gene_flag{$row->{gene}} || "");
+            ($row->{zyg} eq "hom")                        ? "HOM"
+          : ($gene_flag{$row->{gene}} || "") ne ""        ? $gene_flag{$row->{gene}}
+          : (($row->{sf_ar} || $row->{rec_ar}) && !$biallelic) ? "AR_carrier"   # solitary AR het kept via flag
+          :                                                 "";
     }
 
     # ── Write output ──

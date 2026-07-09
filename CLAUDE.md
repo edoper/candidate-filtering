@@ -79,12 +79,18 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   never cite AN=0 as artifact evidence.
 - **Recessive carrier drop:** a solitary het in an AR/XLR gene that is not biallelic (neither HOM
   nor comp-het) is dropped. The permissive `$FREQ_AR`=1% gate only helps variants that pair up.
+  **Override:** `--keep-ar-carriers` (or env `KEEP_AR_CARRIERS=1`) keeps solitary AR carrier hets
+  instead of dropping them, tagged `recessive_flag=AR_carrier` — useful to surface a single rare/damaging
+  AR allele for manual review (possible missed 2nd hit: deep-intronic/CNV), as clinical candidate lists often
+  include. Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit, so an apparent "comp-het" of one rare +
+  one common variant is really a solitary carrier of the rare allele.
 - **AR_hom rescue arm:** a **homozygous, protein-altering** (missense/inframe/stop_lost/start_lost) rare
   MANE variant in a recessive (AR/XLR) panel gene **with AB > 0.75** is kept even with no predictor/ClinVar
-  support (`kept_by=AR_hom`) — biallelic zygosity in a recessive disease gene is the evidence. Catches
-  phenotype-driven recessive diagnoses (e.g. homozygous `ALDH7A1` p.Thr222Ala) below CADD/AM/REVEL thresholds.
-  **Coding-only** (intronic/splice → Pangolin arm; LoF → LoF arm) and **AB>0.75** (guards false-hom) keep it
-  specific — else it floods on benign homozygous polypyrimidine/intron variants. `BS1/BS2/BA1` still flag benign.
+  support (`kept_by=AR_hom`). *General rationale* (not case-tuned): a biallelic genotype in a recessive
+  disease gene is itself pathogenicity evidence under recessive inheritance, independent of missense
+  predictors (calibrated mostly on dominant/het effects). **Coding-only** (intronic/splice → Pangolin arm;
+  LoF → LoF arm) + **AB>0.75** (guards false-hom) keep it specific — else it floods on benign homozygous
+  polypyrimidine/intron variants. `BS1/BS2/BA1` still flag benign-leaning ones.
 - **ACMG output is triage-grade**, not a final clinical call (PM1/PP2 not assessed; PVS1 doesn't
   verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching). PM5 also fires for a
   single-codon in-frame deletion when a P/LP missense exists at the deleted residue (curatorial
