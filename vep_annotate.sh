@@ -11,6 +11,13 @@
 #
 #  Usage:  vep_annotate.sh <input.vcf[.gz]> <output.vcf.gz>
 #
+#  Env:
+#    VEP_FORKS   worker processes (default 12). VEP is CPU-bound, not memory-bound:
+#                12 forks measured at only ~4.4 GB RSS. So on a 20-core box you can
+#                run TWO annotations concurrently at VEP_FORKS=8 (16 cores total) and
+#                halve the wall-clock of a cohort, whose tail is otherwise one genome
+#                at a time. Do not exceed total cores across concurrent runs.
+#
 #  Notes:
 #    - Auto-detects chr vs no-chr convention in input and normalizes to 'chr'
 #      (required because the gnomAD_min custom VCF uses 'chr' prefix).
@@ -127,7 +134,7 @@ VEP_INPUT="$NORM_INPUT"
   --dir_plugins      "$HOME/.vep/Plugins" \
   --assembly         GRCh38 \
   --species          homo_sapiens \
-  --fork             12 \
+  --fork             "${VEP_FORKS:-12}" \
   --buffer_size      5000 \
   --mane_select \
   --hgvs \
