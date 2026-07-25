@@ -89,13 +89,22 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   against. **Override:** `--keep-cohort-artifacts` (or env `KEEP_COHORT_ARTIFACTS=1`) keeps them
   tagged `qc_flag=cohort_artifact` instead of dropping (for founder-enriched cohorts: review the drop
   log — a genuinely private founder allele would surface there). Self-test: `perl filtering_r.pl --selftest-cohort`.
-- **Recessive carrier drop:** a solitary het in an AR/XLR gene that is not biallelic (neither HOM
-  nor comp-het) is dropped. The permissive `$FREQ_AR`=1% gate only helps variants that pair up.
-  **Override:** `--keep-ar-carriers` (or env `KEEP_AR_CARRIERS=1`) keeps solitary AR carrier hets
-  instead of dropping them, tagged `recessive_flag=AR_carrier` — useful to surface a single rare/damaging
-  AR allele for manual review (possible missed 2nd hit: deep-intronic/CNV), as clinical candidate lists often
-  include. Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit, so an apparent "comp-het" of one rare +
-  one common variant is really a solitary carrier of the rare allele.
+- **One MANE row per variant:** a variant hitting >1 MANE transcript (MANE Select + MANE Plus Clinical,
+  or overlapping gene models — e.g. MUTYH) is collapsed to a single row (prefer panel-primary → MANE
+  Select → most evidence arms). `--lookup` still reports every annotation.
+- **Dual-inheritance genes** (panel MOI has **both** AD and AR, e.g. `AD, AR`) are treated as **dominant**
+  for the carrier logic: a solitary het passes through as a normal candidate (`recessive_flag` empty),
+  while a genuine HOM/comp-het still gets the recessive flag. Prevents dropping a dominant-acting variant
+  (LoF etc.) just because the gene also has a recessive mechanism. Only **pure** AR/XLR genes use the
+  carrier path. The HOM/comp-het flag pass runs for **recessive-capable genes only**, so a purely dominant
+  gene with two independent hets is no longer mislabeled `CompHet?`.
+- **Carrier-only tier (DEFAULT):** a solitary het in a **pure** AR/XLR gene that is not biallelic is **kept
+  only if** it clears a strong-evidence bar (ClinVar P/LP ≥1★, HC-LoF, or ≥2 strong predictors:
+  AM≥0.906/CADD≥28.1/EVE-path/REVEL≥0.773) **and** is not classified Benign/Likely-benign; else **dropped**.
+  Kept rows are flagged `recessive_flag=carrier-only`. Same rule covers recessive ACMG-SF genes. Surfaces a
+  single rare/strong AR allele (possible missed 2nd hit: deep-intronic/CNV) without flooding on weak/benign
+  carriers. **Override:** `--keep-ar-carriers` / `KEEP_AR_CARRIERS=1` keeps EVERY carrier regardless of
+  strength (still flagged `carrier-only`). Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit.
 - **AR_hom rescue arm:** a **homozygous, protein-altering** (missense/inframe/stop_lost/start_lost) rare
   MANE variant in a recessive (AR/XLR) panel gene **with AB > 0.75** is kept even with no predictor/ClinVar
   support (`kept_by=AR_hom`). *General rationale* (not case-tuned): a biallelic genotype in a recessive

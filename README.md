@@ -89,8 +89,10 @@ name** from the CSQ header (no hard-coded column indices).
 
 ## The filtering algorithm (`filtering_r.pl`)
 
-Logic runs **per transcript annotation** of each variant (so one variant can yield one
-row per qualifying MANE transcript).
+Logic runs **per transcript annotation** of each variant, then collapses to **one MANE
+row per variant** (a variant hitting >1 MANE transcript — MANE Select + MANE Plus Clinical,
+or overlapping gene models — keeps a single row: panel-primary first, then MANE Select, then
+the most evidence arms). `--lookup` consults still report every annotation.
 
 ### Stage 1 — Structural gates (ALL required, AND)
 
@@ -126,17 +128,26 @@ All thresholds are single constants at the top of `filtering_r.pl`.
 - **Inheritance** uses *parental genotype* (carrier = non-ref GT, not mere site presence):
   `IB / IM / IF / DN` in a full trio; duo-ambiguous `DN/IF` (mother-only) or `DN/IM`
   (father-only); `NA` for a singleton.
-- **`recessive_flag`** per gene: `HOM` (homozygous), `CompHet(trans)` (≥2 het variants
-  phaseable to opposite parents — trio only), or `CompHet?` (≥2 het, unphaseable — e.g. duo).
-- **Recessive carrier drop:** in a recessive (AR/XLR) panel gene, a **solitary het** that is
-  not biallelic (neither `HOM` nor comp-het) is **dropped** — g4e reports no carriers. The
-  relaxed `$FREQ_AR` rarity gate is thus only useful for variants that pair into a biallelic
-  genotype. Same rule applies to recessive ACMG SF genes (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
-  - **`--keep-ar-carriers`** (or env `KEEP_AR_CARRIERS=1`) **keeps** solitary AR/XLR carrier hets
-    instead of dropping them, tagged `recessive_flag=AR_carrier`. Use it to surface a single rare,
-    damaging AR allele for manual review — the exome may miss the second hit (deep-intronic variant,
-    CNV, regulatory), so a carrier of a strong allele in a phenotype-matching gene can be worth a
-    second look (as clinical candidate lists often include). Off by default (avoids carrier noise).
+- **`recessive_flag`** per gene (computed for **recessive-capable genes only** — AR/XLR/dual;
+  a purely dominant gene never gets one, so two independent hets are not mislabeled comp-het):
+  `HOM` (homozygous), `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio
+  only), `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton), or `carrier-only` (see below).
+- **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`) are treated as
+  **dominant** for the carrier logic: a **solitary het passes through as a normal candidate**
+  (`recessive_flag` empty), while a genuine `HOM`/comp-het still gets the recessive flag. This
+  prevents dropping a dominant-acting variant (e.g. a LoF) just because the gene *also* has a
+  recessive mechanism. Only **pure** AR/XLR genes use the carrier path below.
+- **Carrier-only tier (default):** in a **pure** recessive (AR/XLR) panel gene, a **solitary het**
+  that is not biallelic is **kept only if it clears a strong-evidence bar** — ClinVar P/LP (≥1★),
+  LOFTEE-HC, or ≥2 strong predictors (AM ≥ 0.906, CADD ≥ 28.1, EVE pathogenic, REVEL ≥ 0.773) —
+  **and is not classified Benign/Likely-benign**; otherwise it is **dropped**. Kept rows are
+  flagged `recessive_flag=carrier-only`. The relaxed `$FREQ_AR` rarity gate still applies. The same
+  rule covers recessive ACMG SF genes (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
+  This surfaces a single rare, strong AR/XLR allele for review — the exome may miss the second hit
+  (deep-intronic, CNV, regulatory) — without flooding curation with weak or benign carriers.
+  - **`--keep-ar-carriers`** (or env `KEEP_AR_CARRIERS=1`) overrides the strong-evidence gate and
+    **keeps every** solitary AR/XLR carrier het regardless of strength (still flagged `carrier-only`) —
+    e.g. to chase a possible missed second hit across the whole panel.
     ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
     plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
@@ -267,8 +278,9 @@ Inclusion (any one):
   (rarity-capped). *Candidate SF requiring expert classification — not auto-reportable.*
 
 Gene-specific rules from the ACMG table are honored: `TTN` truncating-only, `HFE` C282Y-homozygotes-only,
-and recessive (AR) genes are reported **biallelic-only** (hom or comp-het). Thresholds are `$SF_*`
-constants in `filtering_r.pl`.
+and recessive (AR) genes report biallelic (hom or comp-het) findings; a solitary het in a recessive SF
+gene is subject to the same **carrier-only** tier as primary genes (kept iff strong-evidence & not benign,
+flagged `carrier-only`). Thresholds are `$SF_*` constants in `filtering_r.pl`.
 
 > ⚠️ Secondary findings carry distinct **consent / reporting** obligations — handle per your lab policy.
 
@@ -440,8 +452,8 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
 
 ## Notes & limitations
 
-- `$FREQ_AR` = 1% is deliberately permissive (sensitivity), but solitary het carriers in
-  recessive genes are dropped (only biallelic genotypes survive), so the permissive threshold
+- `$FREQ_AR` = 1% is deliberately permissive (sensitivity); solitary het carriers in pure
+  recessive genes survive only via the strong-evidence **carrier-only** tier (else dropped), so the permissive threshold
   matters only for variants that pair up. `gnomAD_nhomalt` surfaces high-homozygote variants
   for quick triage. Tighten if noisy.
 - `REVEL ≥ 0.644` matches the ClinGen PP3 calibration. The AlphaMissense rescue uses a

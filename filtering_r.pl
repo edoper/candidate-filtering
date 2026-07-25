@@ -33,8 +33,23 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * Genotype-aware: proband zygosity / DP / GQ / allele-balance columns from
 #    FORMAT; parent inheritance uses parental GT (carrier = non-ref), not mere
 #    site presence.                                                [#5,#10]
-#  * Per-gene recessive logic: homozygous and compound-het (trans where
-#    phaseable) flags.                                                 [#6]
+#  * One MANE row per variant: a variant annotating onto >1 MANE transcript
+#    (MANE Select + MANE Plus Clinical, or overlapping gene models) is collapsed to
+#    a single row — prefer panel-primary, then MANE Select, then most evidence arms.
+#    (--lookup consults still report every annotation.)                     [#3]
+#  * Per-gene recessive logic (recessive-capable genes only): homozygous and
+#    compound-het (trans where phaseable) flags. Purely dominant genes get no
+#    HOM/CompHet flag, so two independent hets are not mislabeled comp-het. [#6,#7]
+#  * Dual-inheritance genes (MOI lists BOTH AD and AR, e.g. "AD, AR") are treated
+#    as DOMINANT for the carrier drop: a solitary het passes through as a candidate
+#    (recessive_flag empty), while a genuine hom/comp-het still gets the recessive
+#    flag. Pure AR/XLR genes use the recessive path below.                    [#5]
+#  * Carrier-only tier (DEFAULT): a solitary het in a PURE recessive (AR/XLR) gene
+#    that is not biallelic is KEPT — flagged recessive_flag=carrier-only — only if it
+#    clears the strong-evidence bar (ClinVar P/LP >=1*, HC-LoF, or >=2 strong
+#    predictors AM>=0.906/CADD>=28.1/EVE-path/REVEL>=0.773) AND is not classified
+#    Benign/Likely-benign; otherwise dropped. KEEP_AR_CARRIERS=1 / --keep-ar-carriers
+#    overrides to keep EVERY carrier regardless of strength.              [#1,#2,#6]
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
 #  * ACMG SF secondary findings: the 81 ACMG SF v3.2 genes are ALWAYS scanned
@@ -178,10 +193,12 @@ print "hash mane, listo!\n";
 #   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
 my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
 my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
-# Keep solitary het carriers in recessive (AR/XLR) genes instead of dropping them
-# (default = drop). Useful when you want single rare/damaging AR alleles surfaced for
-# manual review (a possible missed second hit: deep-intronic, CNV) — as the EPIGEN paper
-# did. Env KEEP_AR_CARRIERS=1 or CLI --keep-ar-carriers. Kept rows are tagged AR_carrier.
+# Carrier override. By DEFAULT solitary het carriers of pure recessive (AR/XLR)
+# genes are surfaced via the carrier-only tier (kept iff strong-evidence & not benign,
+# flagged recessive_flag=carrier-only; see the [#1,#2] block). Set KEEP_AR_CARRIERS=1
+# or --keep-ar-carriers to instead keep EVERY carrier regardless of evidence strength
+# (still flagged carrier-only) — e.g. to chase a possible missed second hit (deep-
+# intronic, CNV) across the whole panel.
 my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
 # Keep (don't drop) cohort recurrent-artifact variants, tagging them qc_flag=
 # cohort_artifact instead. Env KEEP_COHORT_ARTIFACTS=1 or CLI --keep-cohort-artifacts.
@@ -451,6 +468,53 @@ sub clinvar_stars {
     return 2 if $t =~ /multiple submitter/;
     return 0 if $t =~ /no assertion|no classification|no interpretation/;
     return 1 if $t =~ /single submitter|conflicting|criteria provided/;
+    return 0;
+}
+
+# ── Mode-of-inheritance predicates over a panel/ACMG MOI string ──────────────
+# A gene is "recessive-capable" if its MOI mentions AR/XLR/recessive, and
+# "dominant-capable" if it mentions AD/XLD/dominant. Dual-inheritance genes
+# (e.g. "AD, AR") satisfy BOTH — handled explicitly by the callers.
+sub moi_recessive { my $m = shift; return (defined $m && $m =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0; }
+sub moi_dominant  { my $m = shift; return (defined $m && $m =~ /\bAD\b|XLD|dominant/i)  ? 1 : 0; }
+
+# ── Carrier-only tier gate ───────────────────────────────────────────────────
+# Strong-evidence bar for SURFACING a solitary heterozygous carrier of a PURE
+# recessive (AR/XLR) gene instead of dropping it (flagged recessive_flag=carrier-only).
+# Mirrors the ACMG-SF strong gate: ClinVar P/LP (>=1 star) OR LOFTEE HC OR
+# >=2 strong computational predictors (AM/CADD/EVE/REVEL). Takes a row data hashref.
+sub carrier_strong_evidence {
+    my ($d) = @_;
+    return 1 if clinvar_pathogenic($d->{clinvar_sig}) && ($d->{clinvar_stars} // 0) >= 1;
+    return 1 if ($d->{loftee} // "") eq "HC";
+    my $n = 0;
+    $n++ if defined $d->{am_score} && $d->{am_score} ne "" && $d->{am_score} >= $SF_AM;
+    $n++ if defined $d->{cadd}     && $d->{cadd}     ne "" && $d->{cadd}     >= $SF_CADD;
+    $n++ if ($d->{eve_class} // "") =~ /athogenic/;
+    $n++ if defined $d->{revel}    && $d->{revel}    ne "" && $d->{revel}    >= $SF_REVEL;
+    return $n >= 2 ? 1 : 0;
+}
+
+# A candidate whose only classification is Benign / Likely-benign (ACMG auto-class
+# or a non-conflicting ClinVar B/LB that is not itself P/LP). Excluded from the
+# carrier-only tier — a benign carrier is noise, not a candidate.
+sub is_benign_class {
+    my ($d) = @_;
+    return 1 if lc($d->{acmg_class} // "") =~ /benign/;
+    my $cs = lc($d->{clinvar_sig} // "");
+    return 1 if $cs =~ /benign/ && $cs !~ /conflict/
+             && !(clinvar_pathogenic($d->{clinvar_sig}) && ($d->{clinvar_stars} // 0) >= 1);
+    return 0;
+}
+
+# Lexicographic ">" over two equal-length numeric preference arrays (used by the
+# one-row-per-variant dedup to pick the row to keep).
+sub _key_gt {
+    my ($a, $b) = @_;
+    for my $k (0 .. $#$a) {
+        return 1 if $a->[$k] > $b->[$k];
+        return 0 if $a->[$k] < $b->[$k];
+    }
     return 0;
 }
 
@@ -1061,6 +1125,7 @@ foreach my $proband (@probands) {
         gene          => resolve($col,'SYMBOL'),
         strand        => resolve($col,'STRAND'),
         transcript    => resolve($col,'Feature'),
+        mane_select   => resolve($col,'MANE_SELECT'),
         consequence   => resolve($col,'Consequence'),
         hgvsc         => resolve($col,'HGVSc'),
         hgvsp         => resolve($col,'HGVSp'),
@@ -1154,7 +1219,7 @@ foreach my $proband (@probands) {
             if ($in_panel && consequence_ok($consequence)) {
                 ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene};
                 $p_moi //= "";
-                my $recessive = ($p_moi =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0;
+                my $recessive = moi_recessive($p_moi);
                 $cand_structural = ($freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
             }
             if ($LOOKUP) {                 # report-everything: force structural pass
@@ -1265,7 +1330,7 @@ foreach my $proband (@probands) {
                 # variants (those go through the Pangolin splice arm; truncating LoF through the LoF arm);
                 # AB>0.75 guards against false-hom calls. Already rare (AR freq gate), MANE, in-panel by
                 # this point. BS1/BS2/BA1 flags still annotate benign-leaning ones for the curator.
-                push @kept, "AR_hom"   if ($p_moi // "") =~ /\bAR\b|XLR|recessiv/i && $zyg eq "hom"
+                push @kept, "AR_hom"   if moi_recessive($p_moi) && $zyg eq "hom"
                                           && $consequence =~ /missense|inframe|stop_lost|start_lost|protein_altering/
                                           && $ab ne "" && $ab > 0.75;   # clean hom call (guards against false-hom/artifact; AB~1.0 expected)
                 if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
@@ -1405,11 +1470,16 @@ foreach my $proband (@probands) {
 
             # Recessive carrier (g4e primary AR gene, MOI from panel) — dropped later
             # unless biallelic (hom or comp-het). Mirrors the ACMG SF AR rule [#6].
-            my $rec_ar = ($class eq "primary" && (($moi // "") =~ /\bAR\b|XLR|recessiv/i)) ? 1 : 0;
+            # [#5] Recessive-carrier drop applies only to genes that are recessive
+            # AND NOT also dominant. Dual-inheritance genes (MOI has AD too, e.g.
+            # "AD, AR") keep their solitary hets as dominant candidates; the biallelic
+            # recessive reading is still surfaced via the per-gene comp-het flag below.
+            my $rec_ar = ($class eq "primary" && moi_recessive($moi) && !moi_dominant($moi)) ? 1 : 0;
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
                 class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar,
+                transcript=>$transcript, mane_select=>(field(\@r,$i{mane_select}) ne "" ? 1 : 0),
                 data=>{
                     chr=>$chr, start=>$start, end=>$start, ref=>$ref, alt=>$alt,
                     gene=>$gene, strand=>$strand,
@@ -1447,13 +1517,45 @@ foreach my $proband (@probands) {
         next;
     }
 
+    # ── [#3] One MANE row per variant ──
+    # A variant can annotate onto >1 MANE transcript (MANE Select + MANE Plus
+    # Clinical, or overlapping gene models — e.g. MUTYH's two transcripts). Collapse
+    # to a single row per variant: prefer a panel-primary row, then MANE Select over
+    # MANE Plus Clinical, then the most evidence arms, then a stable transcript order.
+    # Skipped for --lookup consults, which report every annotation.
+    unless ($LOOKUP) {
+        my %best;
+        for my $row (@rows) {
+            my $arms = ($row->{data}{kept_by} && $row->{data}{kept_by} ne "none")
+                       ? scalar(split /;/, $row->{data}{kept_by}) : 0;
+            my $key = [ ($row->{class} // "") eq "primary" ? 1 : 0,
+                        $row->{mane_select} ? 1 : 0,
+                        $arms,
+                        -length($row->{transcript} // "") ];
+            my $cur = $best{$row->{vid}};
+            $best{$row->{vid}} = { row=>$row, key=>$key }
+                if !$cur || _key_gt($key, $cur->{key});
+        }
+        # Restore a deterministic, genomically-sorted order (hash collapse loses it).
+        @rows = sort { $a->{data}{chr} cmp $b->{data}{chr}
+                       || $a->{data}{start} <=> $b->{data}{start}
+                       || $a->{gene} cmp $b->{gene} }
+                map { $_->{row} } values %best;
+    }
+
     # ── [#6] Per-gene recessive logic over unique variants ──
     my %gene_var;   # gene -> vid -> {zyg, mat, pat}
+    my %gene_rec;   # gene -> recessive-capable (MOI mentions AR/XLR)  [#7]
     for my $row (@rows) {
         $gene_var{$row->{gene}}{$row->{vid}} = { zyg=>$row->{zyg}, mat=>$row->{mat}, pat=>$row->{pat} };
+        $gene_rec{$row->{gene}} //= moi_recessive($row->{data}{MOI});
     }
+    # [#7] Homozygous / compound-het flags are a RECESSIVE concept — compute them
+    # only for recessive-capable genes (AR/XLR, incl. dual AD/AR). A purely dominant
+    # gene carrying two independent hets no longer gets a spurious CompHet? label.
     my %gene_flag;
     for my $g (keys %gene_var) {
+        next unless $gene_rec{$g};
         my @vids = keys %{$gene_var{$g}};
         my $hom  = grep { $gene_var{$g}{$_}{zyg} eq "hom" } @vids;
         my @het  = grep { $gene_var{$g}{$_}{zyg} eq "het" } @vids;
@@ -1467,21 +1569,31 @@ foreach my $proband (@probands) {
         }
         $gene_flag{$g} = $flag;
     }
-    # Recessive genes (g4e primary AR + ACMG SF AR): report biallelic only (hom or
-    # comp-het); drop solitary carriers. g4e wants no carriers at all [#6].
-    # --keep-ar-carriers / KEEP_AR_CARRIERS=1 keeps them instead (tagged AR_carrier below).
-    @rows = grep {
-        my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
-        !( ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic )
-    } @rows unless $LOOKUP || $KEEP_AR_CARRIERS;   # lookup / keep-carriers: report everything
+    # [#1,#2] Recessive-carrier handling. A solitary het in a PURE recessive gene
+    # (rec_ar, or an ACMG-SF AR gene) that is not biallelic (hom / comp-het) is a
+    # carrier. DEFAULT = the carrier-only tier: keep it ONLY if it clears the strong-
+    # evidence bar (ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors) AND is not
+    # classified benign; drop the rest. Kept rows are flagged recessive_flag=carrier-only.
+    # --keep-ar-carriers / KEEP_AR_CARRIERS=1 overrides to keep EVERY carrier
+    # regardless of strength (still flagged carrier-only). Dual AD/AR genes are NOT
+    # rec_ar (see [#5]), so their solitary hets pass through as dominant candidates.
+    unless ($LOOKUP) {
+        @rows = grep {
+            my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
+            my $solitary_carrier = ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic;
+            !$solitary_carrier         ? 1
+              : $KEEP_AR_CARRIERS      ? 1
+              : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));
+        } @rows;
+    }
 
     for my $row (@rows) {
-        my $biallelic = ($row->{zyg} eq "hom" || ($gene_flag{$row->{gene}} || "") =~ /CompHet/);
+        my $gf = $gene_flag{$row->{gene}} // "";
+        my $biallelic = ($row->{zyg} eq "hom" || $gf =~ /CompHet/);
         $row->{data}{recessive_flag} =
-            ($row->{zyg} eq "hom")                        ? "HOM"
-          : ($gene_flag{$row->{gene}} || "") ne ""        ? $gene_flag{$row->{gene}}
-          : (($row->{sf_ar} || $row->{rec_ar}) && !$biallelic) ? "AR_carrier"   # solitary AR het kept via flag
-          :                                                 "";
+            $gf ne ""                                            ? $gf
+          : (($row->{sf_ar} || $row->{rec_ar}) && !$biallelic)   ? "carrier-only"
+          :                                                        "";
     }
 
     # ── Write output ──
