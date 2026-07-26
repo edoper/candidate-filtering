@@ -23,7 +23,7 @@
 !vep_annotate.sh
 
 # Non-patient reference / config
-!g4e-2025.txt
+!g4e-2026.txt
 !typevar.txt
 !mane-plus-clinical-names.txt
 !acmg_sf_v3.2.txt

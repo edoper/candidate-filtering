@@ -20,7 +20,7 @@ inheritance and recessive context for **downstream manual curation**.
 | `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. Also the **single-variant consult** entry point (`-v`/`-l`): annotate one or a few variants (coords or HGVS) from scratch and report everything, gates bypassed. |
 | `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.<panel>.pangolin.tsv`). |
 | `run_filtering.sh` | End-to-end driver: emit candidates → score with Pangolin → final filtering. |
-| `g4e-2025.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. |
+| `g4e-2026.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. Source: **Genes4Epilepsy v2026-03** (bahlolab/Genes4Epilepsy), 1078 genes; provenance header in the file. |
 | `typevar.txt` | Consequence whitelist (atomic terms; matched per `&`-separated sub-term). |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript IDs; only these transcripts are considered. |
 | `acmg_sf_v3.2.txt` | ACMG SF v3.2 secondary-findings genes (81): `gene⇥condition⇥MOI⇥report_category`. Always scanned. |
@@ -101,7 +101,7 @@ the most evidence arms). `--lookup` consults still report every annotation.
 |------|--------|------|
 | MANE transcript | `mane-plus-clinical-names.txt` | CSQ `Feature` ∈ MANE set |
 | Consequence | `typevar.txt` | consequence split on `&`; kept if **any** sub-term is whitelisted |
-| Gene panel | `g4e-2025.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
+| Gene panel | `g4e-2026.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
 | Rarity (MOI-aware) | gnomAD joint AC/AN | AF = AC/AN×100 ≤ threshold: **dominant `$FREQ_AD`=0.01%**, **recessive `$FREQ_AR`=1.0%** (MOI contains AR/XLR) |
 
 ### Stage 2 — Inclusion / rescue gate (at least ONE, OR)
@@ -351,7 +351,7 @@ bash run_filtering.sh
 
 ### Custom gene list (genes of interest)
 
-By default the panel is `g4e-2025.txt`. To restrict to a different gene set, pass a
+By default the panel is `g4e-2026.txt`. To restrict to a different gene set, pass a
 genes-of-interest file (one gene symbol per line; `#` comments and blanks ignored) with
 `-l`/`--list` — it is forwarded to both passes:
 

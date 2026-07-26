@@ -109,7 +109,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  variant string is sent, never patient data).
 #  -v builds a sites-only VCF and runs vep_annotate.sh, removing the annotated
 #  VCF afterward unless --keep-vcf. The panel (Association/MOI/GDV columns) is the
-#  default g4e-2025 unless overridden with -l/--list <genes>.
+#  default g4e-2026 unless overridden with -l/--list <genes>.
 #############################################################################
 
 # ── Tunable thresholds (single source of truth) ──
@@ -210,12 +210,12 @@ if (open my $mc, "<", $CONSTRAINT_FILE) {
 # ── Argument parsing ──
 #   --proband NAME   (repeatable) force NAME as a proband, overriding filename-
 #                    based auto-discovery. NAME must have <NAME>.germline.vep.vcf.gz.
-#   -l/--list FILE   candidate-gene panel override (replaces default g4e-2025).
+#   -l/--list FILE   candidate-gene panel override (replaces default g4e-2026).
 #                    The ONLY way to set the panel (no positional form). Applies
 #                    to normal runs and to -v/--lookup variant consults alike.
 #
 # Gene panel: gene -> "Association \t MOI \t GDV".
-#   Default source = g4e-2025.txt (4 columns). A genes-of-interest file given via
+#   Default source = g4e-2026.txt (4 columns). A genes-of-interest file given via
 #   -l/--list (one gene symbol per line; plain symbols -> Association/MOI/GDV =
 #   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
 my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
@@ -252,16 +252,16 @@ while (@ARGV) {
             "  keep recessive carriers with  --keep-ar-carriers , cohort artifacts with  --keep-cohort-artifacts.\n";
     }
 }
-my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2025.txt";
+my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2026.txt";
 my $custom_panel = (defined $GENES_FILE && $GENES_FILE ne "") ? 1 : 0;
 
 # Output tag = panel basename without extension, minus any trailing year suffix
-# (e.g. g4e-2025.txt -> g4e, Hyperparathyroidism.txt -> Hyperparathyroidism).
+# (e.g. g4e-2026.txt -> g4e, Hyperparathyroidism.txt -> Hyperparathyroidism).
 # All per-run outputs are namespaced by it so different panels don't overwrite.
 my $PANEL_TAG = $PANEL;
 $PANEL_TAG =~ s{.*/}{};
 $PANEL_TAG =~ s/\.[^.]+$//;
-$PANEL_TAG =~ s/-\d{4}$//;               # drop trailing year suffix (g4e-2025 -> g4e)
+$PANEL_TAG =~ s/-\d{4}$//;               # drop trailing year suffix (g4e-2026 -> g4e)
 
 open PANEL, "<", $PANEL or die "gene panel '$PANEL': $!";
 my %epigenes;

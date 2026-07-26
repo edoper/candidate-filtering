@@ -16,7 +16,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 # Optional arg $1 = genes-of-interest file (one symbol per line) forwarded to
-# filtering_r.pl; if omitted the default panel (g4e-2025.txt) is used.
+# filtering_r.pl; if omitted the default panel (g4e-2026.txt) is used.
 # Working directory holds the *.germline.vep.vcf.gz data + reference files
 # (defaults to this script's own directory; override with $WORKDIR).
 GENES="${1:-}"

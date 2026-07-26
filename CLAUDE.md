@@ -26,7 +26,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | `parse_pangolin.pl` | Reduce Pangolin output to per-variant `max(\|Δ\|)` splice score. |
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
 | `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
-| `g4e-2025.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). |
+| `g4e-2026.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). Source: Genes4Epilepsy v2026-03 (bahlolab), 1078 genes; GDV=NO_GDV for all (source has no gene-disease-validity column). |
 | `typevar.txt` | Consequence whitelist. |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript allow-list. |
 | `acmg_sf_v3.2.txt` | 81 ACMG SF v3.2 secondary-findings genes — **always** scanned. |
@@ -41,7 +41,7 @@ bash vep_annotate.sh EPIC280.raw.vcf.gz  EPIC280-P.germline.vep.vcf.gz
 bash vep_annotate.sh EPIC280M.raw.vcf.gz EPIC280-M.germline.vep.vcf.gz
 
 # Full pipeline (emit → Pangolin GPU scoring → final) over all *.germline.vep.vcf.gz
-bash run_filtering.sh                 # default g4e-2025 panel → EPIC280-P.g4e.candidatos
+bash run_filtering.sh                 # default g4e-2026 panel → EPIC280-P.g4e.candidatos
 bash run_filtering.sh my_genes.txt    # custom genes-of-interest list (forwarded to both passes)
 
 # Filtering only (no Pangolin)
@@ -121,7 +121,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   rows are flagged `DN_unconfirmed`. True confirmation needs parental gVCFs/BAMs.
 - **Secondary findings (ACMG SF v3.2)** are always scanned independent of the panel, flagged
   `GDV=Incidental`, and carry distinct consent/reporting obligations.
-- **`-l/--list <genes>` overrides the default g4e-2025 panel** — the only way to set the panel
+- **`-l/--list <genes>` overrides the default g4e-2026 panel** — the only way to set the panel
   (no positional argument; a stray positional is now a hard error). Works in normal runs and in
   `-v` consults alike; sets the Association/MOI/GDV columns and the output `<panel>` tag.
 - **Lookup mode** (`filtering_r.pl -v <variant>` (repeatable), or `--lookup <annotated.vcf.gz>`)
