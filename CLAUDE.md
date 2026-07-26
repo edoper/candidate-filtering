@@ -30,6 +30,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | `typevar.txt` | Consequence whitelist. |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript allow-list. |
 | `acmg_sf_v3.2.txt` | 81 ACMG SF v3.2 secondary-findings genes — **always** scanned. |
+| `gnomad-mis-constraint.txt` | gnomAD v4.1.1 missense constraint per MANE gene (`gene⇥mis.oe⇥mis.z⇥flags`) — drives ACMG **PP2**. |
 
 ## Common commands
 
@@ -145,6 +146,7 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) |
 | **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
+| **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`). **Decoupled from PP3/BP4** — fires only when the calibrated predictor is silent (avoids double-counting the correlated gene- and variant-level missense signal). Flip: drop the `!$pp3 && !$bp4` guard in `acmg_classify`. |
 | **PP3** / **BP4** | Computational, graded Supp/Mod/Strong (AlphaMissense primary, REVEL fallback) |
 | **PP5** / **BP6** | This variant reported P/LP (PP5) or B/LB ≥1★ (BP6) in ClinVar |
 | **BA1** / **BS1** / **BS2** | gnomAD AF ≥ 5% / ≥ 1% / ≥ 10 homozygotes |

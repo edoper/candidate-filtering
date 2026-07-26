@@ -63,7 +63,10 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    single CALIBRATED tool — AlphaMissense primary (Bergquist 2025), REVEL
 #    fallback (Pejaver 2022) — graded Supporting/Moderate/Strong with a REVEL
 #    direction-conflict veto, mapped to the 2015 strength tiers (BP4_Moderate ->
-#    supporting-benign, as 2015 has no benign-Moderate). Other criteria: PVS1,
+#    supporting-benign, as 2015 has no benign-Moderate). PP2: missense in a gene with
+#    low benign-missense variation, from gnomAD v4.1.1 missense constraint (mis.oe <
+#    0.6 on MANE, outliers excluded); DECOUPLED from PP3/BP4 (correlated signals — PP2
+#    applies only when the calibrated predictor is silent). Other criteria: PVS1,
 #    PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.                            [#2]
 #  * Cohort recurrent-artifact filter (internal panel-of-normals): for a real
 #    cohort auto-analyzed together (>= $COHORT_MIN probands), a candidate carried by
@@ -165,6 +168,9 @@ my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare 
 my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
 my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
 my $BP4_REVEL   = 0.290;   # REVEL at/below -> BP4 (computational benign, ClinGen)
+my $PP2_MIS_OE  = 0.6;     # gnomAD v4.1.1 missense o/e below this -> gene is missense-
+                           # constrained; a missense variant there earns PP2 (see acmg_classify)
+my $CONSTRAINT_FILE = 'gnomad-mis-constraint.txt';   # gene -> mis.oe / mis.z / flags
 
 #############################################################################
 # Reference hashes
@@ -179,6 +185,26 @@ my %mane;
 while (my $m = <MANE>) { chomp $m; my ($a,$b) = split /\t/, $m; $mane{$a} = $b; }
 close MANE;
 print "hash mane, listo!\n";
+
+# gnomAD v4.1.1 missense constraint (MANE Select): gene -> mis.oe, for the ACMG PP2
+# criterion. Genes flagged as missense-constraint outliers (outlier_mis / no_exp_mis)
+# are skipped so they can never earn PP2. Optional file — absent -> PP2 simply never fires.
+my %mis_oe;
+if (open my $mc, "<", $CONSTRAINT_FILE) {
+    while (my $l = <$mc>) {
+        next if $l =~ /^#/ || $l !~ /\S/;
+        chomp $l;
+        my ($g,$oe,$z,$flags) = split /\t/, $l;
+        next unless defined $oe && $oe ne "";
+        next if defined $flags && $flags =~ /outlier_mis|no_exp_mis/;
+        $mis_oe{$g} = $oe + 0;
+    }
+    close $mc;
+    printf "missense constraint (PP2): %d MANE genes loaded (mis.oe < %s -> constrained)\n",
+           scalar keys %mis_oe, $PP2_MIS_OE;
+} else {
+    warn "NOTE: $CONSTRAINT_FILE not found — ACMG PP2 disabled (missense constraint unavailable)\n";
+}
 
 # ── Argument parsing ──
 #   --proband NAME   (repeatable) force NAME as a proband, overriding filename-
@@ -618,6 +644,17 @@ sub acmg_classify {
     push @P, "PP3_".ucfirst($pp3) if $pp3;
     push @B, "BP4_".ucfirst($bp4) if $bp4;
 
+    # PP2: missense in a gene with a low rate of benign missense variation, from
+    # gnomAD v4.1.1 missense constraint (mis.oe < $PP2_MIS_OE on the MANE transcript;
+    # constraint outliers already excluded at load). DECOUPLED from PP3/BP4 — gene-level
+    # missense intolerance and the variant-level calibrated predictor are correlated, so
+    # PP2 is applied only when PP3/BP4 did not fire (avoids double-counting the same
+    # missense signal, per ClinGen SVI). To count PP2 independently instead, drop the
+    # "!$pp3 && !$bp4" guard.
+    push @P, "PP2" if $v{consequence} =~ /missense/
+                   && defined $v{mis_oe} && $v{mis_oe} ne "" && $v{mis_oe} < $PP2_MIS_OE
+                   && !$pp3 && !$bp4;
+
     # Benign criteria
     push @B, "BA1" if $v{freq} >= $BA1_FREQ;
     push @B, "BS1" if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
@@ -632,7 +669,7 @@ sub acmg_classify {
     my $pvs = grep { $_ eq "PVS1" } @P;
     my $ps  = grep { /^PS\d/      } @P;            # PS1, PS2
     my $pm  = grep { /^PM\d/      } @P;            # PM2, PM4, PM5, PM6
-    my $pp  = grep { $_ eq "PP5"  } @P;            # PP5
+    my $pp  = grep { $_ eq "PP2" || $_ eq "PP5" } @P;   # PP2 (missense constraint), PP5
     $ps++ if $pp3 eq "strong";
     $pm++ if $pp3 eq "moderate";
     $pp++ if $pp3 eq "supporting";
@@ -1459,6 +1496,7 @@ foreach my $proband (@probands) {
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
                 ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, BP6 star-gate
+                mis_oe=>$mis_oe{$gene},                                       # PP2 (missense constraint)
                 de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
 
             # Combined HGVS: TRANSCRIPT:c.… (p.…)  [protein accession stripped from HGVSp].

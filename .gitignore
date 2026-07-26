@@ -27,6 +27,7 @@
 !typevar.txt
 !mane-plus-clinical-names.txt
 !acmg_sf_v3.2.txt
+!gnomad-mis-constraint.txt
 
 # Explicitly DO NOT track (already covered by "*", listed here as documentation
 # of what must never be committed):
