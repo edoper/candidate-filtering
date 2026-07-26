@@ -44,12 +44,13 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    as DOMINANT for the carrier drop: a solitary het passes through as a candidate
 #    (recessive_flag empty), while a genuine hom/comp-het still gets the recessive
 #    flag. Pure AR/XLR genes use the recessive path below.                    [#5]
-#  * Carrier-only tier (DEFAULT): a solitary het in a PURE recessive (AR/XLR) gene
-#    that is not biallelic is KEPT — flagged recessive_flag=carrier-only — only if it
-#    clears the strong-evidence bar (ClinVar P/LP >=1*, HC-LoF, or >=2 strong
-#    predictors AM>=0.906/CADD>=28.1/EVE-path/REVEL>=0.773) AND is not classified
-#    Benign/Likely-benign; otherwise dropped. KEEP_AR_CARRIERS=1 / --keep-ar-carriers
-#    overrides to keep EVERY carrier regardless of strength.              [#1,#2,#6]
+#  * Recessive carriers (DEFAULT = drop): a solitary het in a PURE recessive (AR/XLR)
+#    gene that is not biallelic is DROPPED (a single het can't explain recessive disease;
+#    carrier states are clinical noise). True comp-hets are unaffected — a gene with >=2
+#    gate-passing hets is a biallelic CompHet and kept. OPT-IN --keep-ar-carriers /
+#    KEEP_AR_CARRIERS=1 surfaces the STRONG such carriers (carrier-only tier: ClinVar
+#    P/LP >=1*, HC-LoF, or >=2 strong predictors AM>=0.906/CADD>=28.1/EVE-path/REVEL>=
+#    0.773, not Benign/LB; flagged recessive_flag=carrier-only) for second-hit hunts. [#1,#2,#6]
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
 #  * ACMG SF secondary findings: the 81 ACMG SF v3.2 genes are ALWAYS scanned
@@ -219,12 +220,12 @@ if (open my $mc, "<", $CONSTRAINT_FILE) {
 #   "NA", or full 4-column g4e format) overrides it. '#' comments/blanks skipped.
 my (@force_probands, $GENES_FILE, $LOOKUP_FILE, @VARIANTS);
 my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
-# Carrier override. By DEFAULT solitary het carriers of pure recessive (AR/XLR)
-# genes are surfaced via the carrier-only tier (kept iff strong-evidence & not benign,
-# flagged recessive_flag=carrier-only; see the [#1,#2] block). Set KEEP_AR_CARRIERS=1
-# or --keep-ar-carriers to instead keep EVERY carrier regardless of evidence strength
-# (still flagged carrier-only) — e.g. to chase a possible missed second hit (deep-
-# intronic, CNV) across the whole panel.
+# Carrier opt-in. By DEFAULT a solitary het carrier of a pure recessive (AR/XLR) gene is
+# DROPPED (biallelic-only; carrier states are clinical noise, and true comp-hets are kept
+# independently via the CompHet flag). Set KEEP_AR_CARRIERS=1 or --keep-ar-carriers to
+# SURFACE the strong such carriers (carrier-only tier: strong-evidence & not benign,
+# flagged recessive_flag=carrier-only; see the [#1,#2] block) — e.g. to chase a possible
+# missed second hit (deep-intronic, CNV) in a targeted investigation.
 my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
 # Keep (don't drop) cohort recurrent-artifact variants, tagging them qc_flag=
 # cohort_artifact instead. Env KEEP_COHORT_ARTIFACTS=1 or CLI --keep-cohort-artifacts.
@@ -1610,19 +1611,22 @@ foreach my $proband (@probands) {
     }
     # [#1,#2] Recessive-carrier handling. A solitary het in a PURE recessive gene
     # (rec_ar, or an ACMG-SF AR gene) that is not biallelic (hom / comp-het) is a
-    # carrier. DEFAULT = the carrier-only tier: keep it ONLY if it clears the strong-
-    # evidence bar (ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors) AND is not
-    # classified benign; drop the rest. Kept rows are flagged recessive_flag=carrier-only.
-    # --keep-ar-carriers / KEEP_AR_CARRIERS=1 overrides to keep EVERY carrier
-    # regardless of strength (still flagged carrier-only). Dual AD/AR genes are NOT
-    # rec_ar (see [#5]), so their solitary hets pass through as dominant candidates.
+    # carrier. DEFAULT = DROP it (g4e reports no carriers: a single het cannot explain a
+    # recessive disease, and carrier states are noise for clinical interpretation). This
+    # does NOT affect true compound hets — a gene with >=2 gate-passing hets is biallelic
+    # (CompHet flag) and every such row is kept regardless. OPT-IN --keep-ar-carriers /
+    # KEEP_AR_CARRIERS=1 instead SURFACES the strong solitary carriers (the carrier-only
+    # tier: kept iff strong-evidence — ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors
+    # — AND not Benign/LB; flagged recessive_flag=carrier-only), for a targeted second-hit
+    # hunt (a deep-intronic / CNV partner the exome may have missed). Dual AD/AR genes are
+    # NOT rec_ar (see [#5]), so their solitary hets pass through as dominant candidates.
     unless ($LOOKUP) {
         @rows = grep {
             my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
             my $solitary_carrier = ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic;
-            !$solitary_carrier         ? 1
-              : $KEEP_AR_CARRIERS      ? 1
-              : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));
+            !$solitary_carrier      ? 1                       # non-carrier or biallelic: keep
+              : !$KEEP_AR_CARRIERS  ? 0                       # DEFAULT: drop solitary carriers
+              : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));  # opt-in: carrier-only tier
         } @rows;
     }
 

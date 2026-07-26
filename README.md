@@ -138,17 +138,18 @@ All thresholds are single constants at the top of `filtering_r.pl`.
   (`recessive_flag` empty), while a genuine `HOM`/comp-het still gets the recessive flag. This
   prevents dropping a dominant-acting variant (e.g. a LoF) just because the gene *also* has a
   recessive mechanism. Only **pure** AR/XLR genes use the carrier path below.
-- **Carrier-only tier (default):** in a **pure** recessive (AR/XLR) panel gene, a **solitary het**
-  that is not biallelic is **kept only if it clears a strong-evidence bar** — ClinVar P/LP (≥1★),
-  LOFTEE-HC, or ≥2 strong predictors (AM ≥ 0.906, CADD ≥ 28.1, EVE pathogenic, REVEL ≥ 0.773) —
-  **and is not classified Benign/Likely-benign**; otherwise it is **dropped**. Kept rows are
-  flagged `recessive_flag=carrier-only`. The relaxed `$FREQ_AR` rarity gate still applies. The same
-  rule covers recessive ACMG SF genes (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
-  This surfaces a single rare, strong AR/XLR allele for review — the exome may miss the second hit
-  (deep-intronic, CNV, regulatory) — without flooding curation with weak or benign carriers.
-  - **`--keep-ar-carriers`** (or env `KEEP_AR_CARRIERS=1`) overrides the strong-evidence gate and
-    **keeps every** solitary AR/XLR carrier het regardless of strength (still flagged `carrier-only`) —
-    e.g. to chase a possible missed second hit across the whole panel.
+- **Recessive carrier drop (default):** in a **pure** recessive (AR/XLR) panel gene, a **solitary het**
+  that is not biallelic (neither `HOM` nor comp-het) is **dropped** — a single het cannot explain a
+  recessive disease, and carrier states are noise for clinical interpretation. **This does not affect
+  true compound hets:** a gene with ≥2 gate-passing hets is biallelic (`CompHet` flag) and every such
+  row is kept regardless. The same drop covers recessive ACMG SF genes
+  (see [Secondary findings](#secondary-findings-acmg-sf-v32)).
+  - **`--keep-ar-carriers`** (or env `KEEP_AR_CARRIERS=1`) is the **opt-in** for a targeted second-hit
+    hunt: it **surfaces the strong** solitary AR/XLR carriers — the **carrier-only tier**, kept only if
+    they clear a strong-evidence bar (ClinVar P/LP ≥1★, LOFTEE-HC, or ≥2 strong predictors: AM ≥ 0.906,
+    CADD ≥ 28.1, EVE pathogenic, REVEL ≥ 0.773) **and** are not Benign/Likely-benign — flagged
+    `recessive_flag=carrier-only`. Use it when you suspect the exome missed a second allele (deep-intronic,
+    CNV, regulatory) in a specific gene/case.
     ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
     plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
@@ -281,8 +282,8 @@ Inclusion (any one):
 
 Gene-specific rules from the ACMG table are honored: `TTN` truncating-only, `HFE` C282Y-homozygotes-only,
 and recessive (AR) genes report biallelic (hom or comp-het) findings; a solitary het in a recessive SF
-gene is subject to the same **carrier-only** tier as primary genes (kept iff strong-evidence & not benign,
-flagged `carrier-only`). Thresholds are `$SF_*` constants in `filtering_r.pl`.
+gene is dropped by default (surfaced via `--keep-ar-carriers`, the **carrier-only** tier, like primary
+genes). Thresholds are `$SF_*` constants in `filtering_r.pl`.
 
 > ⚠️ Secondary findings carry distinct **consent / reporting** obligations — handle per your lab policy.
 
@@ -455,7 +456,7 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
 ## Notes & limitations
 
 - `$FREQ_AR` = 1% is deliberately permissive (sensitivity); solitary het carriers in pure
-  recessive genes survive only via the strong-evidence **carrier-only** tier (else dropped), so the permissive threshold
+  recessive genes are dropped by default (surfaced only via `--keep-ar-carriers`), so the permissive threshold
   matters only for variants that pair up. `gnomAD_nhomalt` surfaces high-homozygote variants
   for quick triage. Tighten if noisy.
 - `REVEL ≥ 0.644` matches the ClinGen PP3 calibration. The AlphaMissense rescue uses a

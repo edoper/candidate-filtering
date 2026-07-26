@@ -99,13 +99,13 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   (LoF etc.) just because the gene also has a recessive mechanism. Only **pure** AR/XLR genes use the
   carrier path. The HOM/comp-het flag pass runs for **recessive-capable genes only**, so a purely dominant
   gene with two independent hets is no longer mislabeled `CompHet?`.
-- **Carrier-only tier (DEFAULT):** a solitary het in a **pure** AR/XLR gene that is not biallelic is **kept
-  only if** it clears a strong-evidence bar (ClinVar P/LP ≥1★, HC-LoF, or ≥2 strong predictors:
-  AM≥0.906/CADD≥28.1/EVE-path/REVEL≥0.773) **and** is not classified Benign/Likely-benign; else **dropped**.
-  Kept rows are flagged `recessive_flag=carrier-only`. Same rule covers recessive ACMG-SF genes. Surfaces a
-  single rare/strong AR allele (possible missed 2nd hit: deep-intronic/CNV) without flooding on weak/benign
-  carriers. **Override:** `--keep-ar-carriers` / `KEEP_AR_CARRIERS=1` keeps EVERY carrier regardless of
-  strength (still flagged `carrier-only`). Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit.
+- **Recessive carrier drop (DEFAULT):** a solitary het in a **pure** AR/XLR gene that is not biallelic is
+  **dropped** — a single het can't explain recessive disease; carrier states are clinical noise. **True
+  comp-hets are unaffected:** a gene with ≥2 gate-passing hets is a biallelic `CompHet` and kept. Same drop
+  covers recessive ACMG-SF genes. **Opt-in:** `--keep-ar-carriers` / `KEEP_AR_CARRIERS=1` surfaces the
+  **strong** such carriers for a targeted 2nd-hit hunt (carrier-only tier: ClinVar P/LP ≥1★, HC-LoF, or ≥2
+  strong predictors AM≥0.906/CADD≥28.1/EVE-path/REVEL≥0.773, not Benign/LB; flagged
+  `recessive_flag=carrier-only`). Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit.
 - **AR_hom rescue arm:** a **homozygous, protein-altering** (missense/inframe/stop_lost/start_lost) rare
   MANE variant in a recessive (AR/XLR) panel gene **with AB > 0.75** is kept even with no predictor/ClinVar
   support (`kept_by=AR_hom`). *General rationale* (not case-tuned): a biallelic genotype in a recessive
