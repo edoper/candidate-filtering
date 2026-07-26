@@ -146,7 +146,7 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) |
 | **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
-| **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`). **Decoupled from PP3/BP4** — fires only when the calibrated predictor is silent (avoids double-counting the correlated gene- and variant-level missense signal). Flip: drop the `!$pp3 && !$bp4` guard in `acmg_classify`. |
+| **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`). Counts **independently of PP3** (separate ACMG lines), but **suppressed when BP4 fires** (no gene-level pathogenic support for a benign-predicted variant). Guard in `acmg_classify` is `!$bp4`; drop it to fire even alongside BP4. |
 | **PP3** / **BP4** | Computational, graded Supp/Mod/Strong (AlphaMissense primary, REVEL fallback) |
 | **PP5** / **BP6** | This variant reported P/LP (PP5) or B/LB ≥1★ (BP6) in ClinVar |
 | **BA1** / **BS1** / **BS2** | gnomAD AF ≥ 5% / ≥ 1% / ≥ 10 homozygotes |

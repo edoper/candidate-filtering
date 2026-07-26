@@ -223,7 +223,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PM4** | Protein length change (in-frame indel / `stop_lost`) | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
   | **PM6** | **Assumed** de novo (DN unconfirmed / duo) | parental GT |
-  | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). **Decoupled from PP3/BP4** — applied only when the calibrated predictor is silent, so the correlated gene- and variant-level missense signals are not double-counted (per ClinGen SVI). | gnomAD v4.1.1 constraint |
+  | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). Counts **independently of PP3** (both are legitimate separate ACMG lines — gene-level intolerance vs variant-level prediction), but **suppressed when BP4 fires** (a benign-predicted variant gets no gene-level pathogenic support). | gnomAD v4.1.1 constraint |
   | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below) | AlphaMissense / REVEL |
   | **PP5** | This variant is reported pathogenic in ClinVar | ClinVar |
 

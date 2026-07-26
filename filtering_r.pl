@@ -65,9 +65,9 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    direction-conflict veto, mapped to the 2015 strength tiers (BP4_Moderate ->
 #    supporting-benign, as 2015 has no benign-Moderate). PP2: missense in a gene with
 #    low benign-missense variation, from gnomAD v4.1.1 missense constraint (mis.oe <
-#    0.6 on MANE, outliers excluded); DECOUPLED from PP3/BP4 (correlated signals — PP2
-#    applies only when the calibrated predictor is silent). Other criteria: PVS1,
-#    PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.                            [#2]
+#    0.6 on MANE, outliers excluded); counts independently of PP3, but suppressed when
+#    BP4 fired (no gene-level pathogenic support for a benign-predicted variant). Other
+#    criteria: PVS1, PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.           [#2]
 #  * Cohort recurrent-artifact filter (internal panel-of-normals): for a real
 #    cohort auto-analyzed together (>= $COHORT_MIN probands), a candidate carried by
 #    >= $COHORT_MAX_FRAC of samples AND absent from gnomAD (AF < $COHORT_ART_FREQ) is
@@ -646,14 +646,15 @@ sub acmg_classify {
 
     # PP2: missense in a gene with a low rate of benign missense variation, from
     # gnomAD v4.1.1 missense constraint (mis.oe < $PP2_MIS_OE on the MANE transcript;
-    # constraint outliers already excluded at load). DECOUPLED from PP3/BP4 — gene-level
-    # missense intolerance and the variant-level calibrated predictor are correlated, so
-    # PP2 is applied only when PP3/BP4 did not fire (avoids double-counting the same
-    # missense signal, per ClinGen SVI). To count PP2 independently instead, drop the
-    # "!$pp3 && !$bp4" guard.
+    # constraint outliers already excluded at load). PP2 counts INDEPENDENTLY of PP3
+    # (both are legitimate, separate ACMG lines — gene-level missense intolerance vs the
+    # variant-level predictor — and ACMG 2015 permits combining them). It is still
+    # suppressed when BP4 fired: a variant the calibrated tool predicts BENIGN must not
+    # also collect gene-level pathogenic support (a genuine contradiction, not just
+    # correlation). To let PP2 fire even alongside BP4, drop the "!$bp4" guard.
     push @P, "PP2" if $v{consequence} =~ /missense/
                    && defined $v{mis_oe} && $v{mis_oe} ne "" && $v{mis_oe} < $PP2_MIS_OE
-                   && !$pp3 && !$bp4;
+                   && !$bp4;
 
     # Benign criteria
     push @B, "BA1" if $v{freq} >= $BA1_FREQ;
