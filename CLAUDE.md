@@ -26,7 +26,7 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | `parse_pangolin.pl` | Reduce Pangolin output to per-variant `max(\|Δ\|)` splice score. |
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
 | `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
-| `g4e-2026.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). Source: Genes4Epilepsy v2026-03 (bahlolab), 1078 genes; GDV=NO_GDV for all (source has no gene-disease-validity column). |
+| `g4e-2026.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). Source: Genes4Epilepsy v2026-03 (bahlolab), 1078 genes. GDV (disease + MONDO) carried over from the prior g4e-2025 for the 93 genes that had one; NO_GDV otherwise (v2026-03 has no GDV column). |
 | `typevar.txt` | Consequence whitelist. |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript allow-list. |
 | `acmg_sf_v3.2.txt` | 81 ACMG SF v3.2 secondary-findings genes — **always** scanned. |
