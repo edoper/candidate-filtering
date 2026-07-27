@@ -33,20 +33,20 @@ INPUT="${1:?Usage: $0 <input.vcf[.gz]> <output.vcf.gz>}"
 OUTPUT="${2:?Usage: $0 <input.vcf[.gz]> <output.vcf.gz>}"
 
 # ── Paths ──
-VEP="$HOME/ensembl-vep/vep"
-VEP_DATA="$HOME/vep_data"
-VEP_REFS="$HOME/vep_refs"
-GNOMAD_VCF="$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz"
-CLINVAR_VCF="$VEP_REFS/clinvar/clinvar.chr.vcf.gz"
-CADD_SNV="$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz"            # CADD GRCh38 v1.7
-CADD_INDEL="$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz" # CADD GRCh38 v1.7 indels
+# VEP/VEP_DATA/VEP_REFS/VEP_PLUGINS come from site.sh (override in an untracked
+# site.env — see README section 0). Nothing here is tied to one machine.
+. "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/site.sh"
+GNOMAD_VCF="${GNOMAD_VCF:-$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz}"
+CLINVAR_VCF="${CLINVAR_VCF:-$VEP_REFS/clinvar/clinvar.chr.vcf.gz}"
+CADD_SNV="${CADD_SNV:-$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz}"            # CADD GRCh38 v1.7
+CADD_INDEL="${CADD_INDEL:-$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz}" # CADD GRCh38 v1.7 indels
 
 # ── Environment ──
-export PERL5LIB="$HOME/.vep/Plugins/loftee:$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-export LD_PRELOAD="$HOME/htslib/libhts.so${LD_PRELOAD:+:$LD_PRELOAD}"
+export PERL5LIB="$PERL5LIB_EXTRA:${PERL5LIB:-}"
+[ -e "$HTSLIB_SO" ] && export LD_PRELOAD="$HTSLIB_SO${LD_PRELOAD:+:$LD_PRELOAD}"
 
 # ── Sanity checks ──
-[[ -x "$VEP"        ]] || { echo "ERROR: VEP not found at $VEP" >&2; exit 1; }
+[[ -x "$VEP"        ]] || { echo "ERROR: VEP not found at $VEP — set VEP/VEP_REFS in site.env (README section 0)" >&2; exit 1; }
 [[ -s "$GNOMAD_VCF" ]] || { echo "ERROR: gnomAD custom VCF not found: $GNOMAD_VCF" >&2; exit 1; }
 [[ -s "$CADD_SNV"   ]] || { echo "ERROR: CADD SNV file not found: $CADD_SNV" >&2; exit 1; }
 [[ -s "$CADD_INDEL" ]] || { echo "ERROR: CADD indel file not found: $CADD_INDEL" >&2; exit 1; }
@@ -131,7 +131,7 @@ VEP_INPUT="$NORM_INPUT"
   --cache \
   --offline \
   --dir_cache        "$VEP_DATA" \
-  --dir_plugins      "$HOME/.vep/Plugins" \
+  --dir_plugins      "$VEP_PLUGINS" \
   --assembly         GRCh38 \
   --species          homo_sapiens \
   --fork             "${VEP_FORKS:-12}" \
@@ -146,7 +146,7 @@ VEP_INPUT="$NORM_INPUT"
   --regulatory \
   --variant_class \
   --check_existing \
-  --plugin LoF,loftee_path:"$HOME/.vep/Plugins/loftee",human_ancestor_fa:"$VEP_REFS/loftee/GRCh38/human_ancestor.fa.gz",conservation_file:"$VEP_REFS/loftee/GRCh38/loftee.sql",gerp_bigwig:"$VEP_REFS/loftee/GRCh38/gerp_conservation_scores.homo_sapiens.GRCh38.bw" \
+  --plugin LoF,loftee_path:"$VEP_PLUGINS/loftee",human_ancestor_fa:"$VEP_REFS/loftee/GRCh38/human_ancestor.fa.gz",conservation_file:"$VEP_REFS/loftee/GRCh38/loftee.sql",gerp_bigwig:"$VEP_REFS/loftee/GRCh38/gerp_conservation_scores.homo_sapiens.GRCh38.bw" \
   --plugin REVEL,"$VEP_REFS/REVEL/new_tabbed_revel_grch38.tsv.gz" \
   --plugin AlphaMissense,file="$VEP_REFS/AlphaMissense/AlphaMissense_hg38.tsv.gz" \
   --plugin EVE,file="$VEP_REFS/EVE/eve_merged.vcf.gz" \

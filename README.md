@@ -20,6 +20,9 @@ inheritance and recessive context for **downstream manual curation**.
 | `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. Also the **single-variant consult** entry point (`-v`/`-l`): annotate one or a few variants (coords or HGVS) from scratch and report everything, gates bypassed. |
 | `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.<panel>.pangolin.tsv`). |
 | `run_filtering.sh` | End-to-end driver: emit candidates → score with Pangolin → final filtering. |
+| `site.sh` | One place for every external path (VEP, plugin data, Pangolin, ClinVar AA tables). Override in an untracked `site.env` — see [Setup](#setup). |
+| `test/test_filtering.sh` | Regression test on synthetic data: self-tests, reference-file integrity, and end-to-end gating. No VEP, no data, no GPU, ~5s. |
+| `LICENSE` | MIT, with a note that this is a triage tool requiring professional review. |
 | `g4e-2026.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. Source: **Genes4Epilepsy v2026-03** (bahlolab/Genes4Epilepsy), 1078 genes; provenance header in the file. |
 | `typevar.txt` | Consequence whitelist (atomic terms; matched per `&`-separated sub-term). |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript IDs; only these transcripts are considered. |
@@ -307,11 +310,104 @@ VCF. `parse_pangolin.pl` reduces each variant to `max(|increase|, |decrease|)`.
 
 ## Setup
 
-**Annotation** requires Ensembl VEP (offline GRCh38 cache) with the LOFTEE / REVEL /
-AlphaMissense / EVE / CADD plugins and data, plus the custom gnomAD and ClinVar VCFs
-(chr-prefixed, bgzipped, tabixed). Paths are set near the top of `vep_annotate.sh`.
+> **Setting this up on a new machine? Follow 0.1 → 0.8 below in order.** It is a long
+> one-time job: the annotation resources total roughly **200 GB**. Nothing here is tied to one
+> machine — every path is configurable (step 0.2), so the repo can live anywhere and the data
+> wherever you have room.
 
-**Splice scoring** requires a Python/conda env with PyTorch (GPU) and Pangolin:
+### 0.1 — Clone and check the parts that need nothing
+
+```bash
+git clone https://github.com/edoper/candidate-filtering.git
+cd candidate-filtering
+./test/test_filtering.sh          # ~5s: needs only perl + bgzip, no VEP, no data
+```
+
+That exercises the filtering logic on synthetic data. It passing means the algorithm and the
+tracked gene panels are intact — you can then add the annotation resources below.
+
+### 0.2 — Tell the repo where your data lives
+
+All paths come from `site.sh`. Override any of them by exporting, or by creating an untracked
+**`site.env`** beside it — that file is where your own layout belongs, and it is never committed:
+
+```bash
+# site.env
+VEP=/opt/ensembl-vep/vep                 # the vep executable
+VEP_DATA=/data/vep_cache                 # --dir_cache (the offline GRCh38 cache)
+VEP_REFS=/data/vep_refs                  # plugin data + custom VCFs (steps 0.4-0.5)
+VEP_PLUGINS=$HOME/.vep/Plugins           # --dir_plugins (must contain loftee/)
+CLINVAR_AA_DIR=/data/clinvar-aa          # step 0.6 (optional; enables PS1/PM5)
+CONDA_BASE=$HOME/miniconda3              # step 0.7
+```
+
+Defaults (`$HOME/ensembl-vep`, `$HOME/vep_data`, `$HOME/vep_refs`, `$HOME/.vep/Plugins`) are the
+layout this pipeline was developed against.
+
+### 0.3 — Ensembl VEP + the GRCh38 cache
+
+```bash
+git clone https://github.com/Ensembl/ensembl-vep.git
+cd ensembl-vep && perl INSTALL.pl        # choose the homo_sapiens_vep GRCh38 cache (~25 GB)
+```
+
+`INSTALL.pl` also installs plugins; select **LoF (LOFTEE), REVEL, AlphaMissense, EVE, CADD**. The
+filter needs `bcftools` too (`conda install -c bioconda bcftools htslib`).
+
+### 0.4 — Plugin data files
+
+Each plugin needs its own dataset, all GRCh38, under `$VEP_REFS`. They are large and each has its
+own licence — check the terms for your use (AlphaMissense and REVEL are free for academic use;
+CADD requires a licence for commercial use).
+
+| Under `$VEP_REFS/` | What | Where from |
+|---|---|---|
+| `CADD/whole_genome_SNVs.tsv.gz` (+ `.tbi`) | CADD v1.7 SNVs (~80 GB) | [cadd.gs.washington.edu/download](https://cadd.gs.washington.edu/download) |
+| `CADD/gnomad.genomes.r4.0.indel.tsv.gz` (+ `.tbi`) | CADD v1.7 indels | same |
+| `REVEL/new_tabbed_revel_grch38.tsv.gz` (+ `.tbi`) | REVEL | [sites.google.com/site/revelgenomics](https://sites.google.com/site/revelgenomics/downloads) |
+| `AlphaMissense/AlphaMissense_hg38.tsv.gz` (+ `.tbi`) | AlphaMissense | [Zenodo 10813168](https://zenodo.org/records/10813168) |
+| `EVE/eve_merged.vcf.gz` (+ `.tbi`) | EVE | [evemodel.org](https://evemodel.org/) |
+| `loftee/GRCh38/` | `human_ancestor.fa.gz`, `loftee.sql`, `gerp_conservation_scores…bw` | [LOFTEE GRCh38 branch](https://github.com/konradjk/loftee/tree/grch38) |
+
+### 0.5 — The two custom VCFs (gnomAD + ClinVar)
+
+These are `--custom` annotations, not plugins, and both must be **`chr`-prefixed, bgzipped and
+tabixed** — the annotation step asserts they exist and fails early if not.
+
+```bash
+mkdir -p $VEP_REFS/gnomAD_min $VEP_REFS/clinvar
+
+# ClinVar (small, ~100 MB) — add the 'chr' prefix the pipeline expects
+wget https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz
+bcftools annotate --rename-chrs <(for i in $(seq 1 22) X Y MT; do echo -e "$i\tchr$i"; done) \
+  clinvar.vcf.gz -Oz -o $VEP_REFS/clinvar/clinvar.chr.vcf.gz
+tabix -p vcf $VEP_REFS/clinvar/clinvar.chr.vcf.gz
+
+# gnomAD v4.1 joint frequencies, reduced to the fields the filter reads
+#   (AC_joint, AN_joint, AF_joint, nhomalt_joint, FILTER) — the full release is ~2 TB, so
+#   subset to MANE regions and strip everything else before saving.
+#   -> $VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz  (+ .tbi)
+```
+
+> **`AC=0 / AN=0` in the output means "absent from gnomAD"** (the custom VCF is sites-only), **not**
+> an uncallable region. Never read `AN=0` as evidence of a technical artifact.
+
+### 0.6 — ClinVar amino-acid tables (optional — enables ACMG PS1/PM5)
+
+PS1/PM5 need per-residue P/LP and B/LB missense evidence in two TSVs:
+
+```
+$CLINVAR_AA_DIR/clinvar.MANE_missense.PLP.tsv
+$CLINVAR_AA_DIR/clinvar.MANE_missense.BLB.tsv
+```
+
+Build them by splitting the ClinVar VCF's MANE missense records by clinical significance, keyed by
+`gene:protein_position`. **If `CLINVAR_AA_DIR` is unset or the files are missing, filtering still
+runs normally and PS1/PM5 are simply skipped** with a warning — so you can defer this.
+
+### 0.7 — Pangolin splice scoring (optional but recommended)
+
+Needs a GPU-capable PyTorch environment:
 
 ```bash
 conda create -y -n pangolin -c conda-forge python=3.10 pip
@@ -321,18 +417,24 @@ pip install pyvcf3 gffutils biopython pandas pyfastx "setuptools<81"
 pip install git+https://github.com/tkzeng/Pangolin.git
 ```
 
-Plus a chr-named GRCh38 primary-assembly FASTA and the GENCODE annotation DB
-(`gencode.v38.annotation.db`) — see `run_filtering.sh` for the expected paths.
+Plus a chr-named GRCh38 primary-assembly FASTA (samtools-indexed) and the GENCODE annotation DB, by
+default at `$VEP_REFS/pangolin/GRCh38.primary_assembly.genome.fa` and `…/gencode.v38.annotation.db`
+(override with `PANGOLIN_FASTA` / `PANGOLIN_DB`). Without Pangolin the splice rescue arm and the
+`pangolin_score` column are unavailable; everything else works — run `filtering_r.pl` directly
+instead of `run_filtering.sh`.
 
-**Filtering** needs only system Perl (no modules). For **PS1/PM5** it additionally reads the
-ClinVar MANE-missense resource `clinvar.MANE_missense.{PLP,BLB}.tsv` (built by
-`gbackbone/input-clinvar/clinvar_split_mane_missense.sh`). The directory defaults to
-`/home/edo/gbackbone/input-clinvar` and is overridable with the `CLINVAR_AA_DIR` env var; if the
-resource is absent, filtering still runs and PS1/PM5 are simply skipped (logged).
+The same FASTA doubles as `REF_FASTA` for the homopolymer QC flag; if absent, that flag is skipped.
 
-**Input compatibility:** the filter reads both single-source VCFs (e.g. DRAGEN) and the Sarek
-**union-consensus** output of `consensus.sh` — it picks up the `GT_SOURCE`/`NCALLERS`/`CONF` INFO
-tags when present (and flags `GT_rescued` for borrowed, VAF-less genotypes), and ignores them otherwise.
+### 0.8 — Where the input comes from
+
+This repo starts from an **annotated** VCF. To produce the calls in the first place, see the
+companion repo **[sarek-clinical](https://github.com/edoper/sarek-clinical)** (four-caller
+consensus germline calling on Google Cloud). It hands `<sample>.consensus.vcf.gz` straight to
+`vep_annotate.sh` here. Single-source VCFs (e.g. DRAGEN) work equally well — the filter picks up
+the consensus `GT_SOURCE`/`NCALLERS`/`CONF` tags when present and ignores them otherwise.
+
+Name inputs `<FAMILY>-P/-M/-F` (proband/mother/father) — the filename drives trio/duo
+auto-discovery. Plainly-named singletons also work (each is analysed as its own proband).
 
 ---
 
@@ -437,14 +539,24 @@ the dataset) the sample is analyzed as a **singleton** — `inheritance = NA`, n
 *trans* phasing (HOM and `CompHet?` flags still apply from the sample's own genotypes). Each
 proband writes its own `<name>.<panel>.candidatos`, so forcing one does not overwrite another.
 
-### Configuration (env overrides for `run_filtering.sh`)
+### Configuration
 
-| Variable | Default |
-|----------|---------|
-| `CONDA_BASE` | `$HOME/miniconda3` |
-| `PANGOLIN_ENV` | `pangolin` |
-| `PANGOLIN_FASTA` | `$HOME/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa` |
-| `PANGOLIN_DB` | `$HOME/vep_refs/pangolin/gencode.v38.annotation.db` |
+Every external path lives in **`site.sh`**. Override any of them by exporting the variable, or by
+creating an untracked **`site.env`** beside it (see [Setup 0.2](#02--tell-the-repo-where-your-data-lives)). Precedence: explicit export > `site.env` > the defaults below.
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `VEP` | `$HOME/ensembl-vep/vep` | annotation |
+| `VEP_DATA` | `$HOME/vep_data` | annotation (`--dir_cache`) |
+| `VEP_REFS` | `$HOME/vep_refs` | annotation (plugin data + custom VCFs) |
+| `VEP_PLUGINS` | `$HOME/.vep/Plugins` | annotation (`--dir_plugins`, incl. `loftee/`) |
+| `VEP_FORKS` | `4` | annotation |
+| `CLINVAR_AA_DIR` | *(empty — PS1/PM5 skipped)* | filtering |
+| `REF_FASTA` | `$PANGOLIN_FASTA` | filtering (homopolymer QC flag) |
+| `CONDA_BASE` | `$HOME/miniconda3` | Pangolin |
+| `PANGOLIN_ENV` | `pangolin` | Pangolin |
+| `PANGOLIN_FASTA` | `$VEP_REFS/pangolin/GRCh38.primary_assembly.genome.fa` | Pangolin |
+| `PANGOLIN_DB` | `$VEP_REFS/pangolin/gencode.v38.annotation.db` | Pangolin |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
 `$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ`) are
@@ -473,6 +585,13 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
 
 ## Data privacy
 
-Patient VCFs and all run outputs (`*.candidatos`, `*.pangolin*`, `*_summary.html`, logs)
-are PHI and are excluded by the allow-list `.gitignore`. Keep any repository hosting this
-code **private**.
+Patient VCFs and all run outputs (`*.candidatos`, `*.pangolin*`, `*_summary.html`, logs) are PHI.
+
+`.gitignore` is an **allow-list**: it ignores `*` and then un-ignores only pipeline code and
+non-patient reference config, so patient data cannot be committed by accident. **Never remove the
+leading `*` rule**; to track a new file add an explicit `!<file>` exception.
+
+That design is what makes it safe for **this repository to be public** — only code and public
+reference data are tracked. Your own paths belong in `site.env` (untracked), never in a tracked
+file. If you fork this for a deployment where run outputs might land inside the working tree, verify
+`git status` shows nothing patient-derived before your first push.

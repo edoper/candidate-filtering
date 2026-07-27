@@ -15,7 +15,10 @@ See `README.md` for the full algorithm reference; this file is the working quick
 - `.gitignore` is an **allow-list**: it ignores `*` and then un-ignores only code + non-patient
   reference config. **Never remove the leading `*` rule.** To track a new code/config file, add
   an explicit `!<file>` exception.
-- Keep any repo hosting this code **private**.
+- **This repo is PUBLIC** — that is safe *because* the allow-list works, not despite it. Only code
+  and public reference data are tracked. Before adding any `!<file>` exception, confirm the file
+  contains no patient-derived content. Local paths go in the untracked `site.env`, never in a
+  tracked file.
 
 ## Layout
 
@@ -25,6 +28,8 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | `filtering_r.pl` | The filtering algorithm (Perl, no modules). Reads annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. **All thresholds are constants at the top of this file.** Also the single-variant consult entry point (`-v`): coords/HGVS in → annotate → transposed readable view (`Lookup.<coords>.<panel>.candidatos`), gates bypassed. |
 | `parse_pangolin.pl` | Reduce Pangolin output to per-variant `max(\|Δ\|)` splice score. |
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
+| `site.sh` | Every external path (VEP/plugins/Pangolin/ClinVar-AA). Sourced by `vep_annotate.sh` + `run_filtering.sh`; exports the env vars `filtering_r.pl` reads. Override via untracked `site.env`. **No absolute personal paths in tracked code.** |
+| `test/test_filtering.sh` | Regression test (synthetic, ~5s, no VEP/GPU). **Run after touching `filtering_r.pl`** — a broken gate yields a plausible table, not an error. |
 | `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
 | `g4e-2026.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). Source: Genes4Epilepsy v2026-03 (bahlolab), 1078 genes. GDV (disease + MONDO) carried over from the prior g4e-2025 for the 93 genes that had one; NO_GDV otherwise (v2026-03 has no GDV column). |
 | `typevar.txt` | Consequence whitelist. |
@@ -158,12 +163,14 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 
 - **Annotation:** Ensembl VEP (offline GRCh38 cache) + LOFTEE/REVEL/AlphaMissense/EVE/CADD
   plugins & data + custom gnomAD v4.1 and ClinVar VCFs (chr-prefixed, bgzipped, tabixed). Paths
-  set near the top of `vep_annotate.sh`. Also needs `bcftools`.
+  come from `site.sh` (`VEP`, `VEP_DATA`, `VEP_REFS`, `VEP_PLUGINS`) — override in an untracked
+  `site.env`, never by editing tracked code. README "Setup" has the from-scratch install.
+  Also needs `bcftools`.
 - **Splice scoring:** conda env `pangolin` with PyTorch (GPU) + Pangolin, a chr-named GRCh38
   primary-assembly FASTA, and `gencode.v38.annotation.db`. Override via `CONDA_BASE`,
   `PANGOLIN_ENV`, `PANGOLIN_FASTA`, `PANGOLIN_DB`.
 - **Filtering:** system Perl only (no modules). PS1/PM5 additionally read
-  `clinvar.MANE_missense.{PLP,BLB}.tsv` from `$CLINVAR_AA_DIR` (default
-  `/home/edo/gbackbone/input-clinvar`); if absent, filtering still runs and PS1/PM5 are skipped.
+  `clinvar.MANE_missense.{PLP,BLB}.tsv` from `$CLINVAR_AA_DIR` (**unset by default** — set it in
+  `site.env`); if absent, filtering still runs and PS1/PM5 are skipped with a warning.
 - **Input compatibility:** reads both single-source VCFs (e.g. DRAGEN) and the Sarek
   union-consensus output of `consensus.sh` (picks up `GT_SOURCE`/`NCALLERS`/`CONF` tags when present).

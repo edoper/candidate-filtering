@@ -160,7 +160,7 @@ my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
 # ── QC / artifact flags [#7] and parental-quality de-novo confidence [#6] ──
 my $QC_MIN_DP   = 15;      # depth below this -> lowDP
 my $QC_MIN_GQ   = 20;      # genotype quality below this -> lowGQ
-my $REF_FASTA   = '/home/edo/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa';
+my $REF_FASTA   = $ENV{REF_FASTA} // $ENV{PANGOLIN_FASTA} // '';  # set by site.sh; blank => check skipped
 my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopolymer check
 
 # ── Automated ACMG/AMP classification (InterVar-style, triage only) [#2] ──
@@ -301,7 +301,7 @@ if (open my $afh, "<", $ACMG_FILE) {
 
 # ── ClinVar amino-acid evidence for PS1/PM5 (optional; graceful if absent) ──
 # Built from the MANE-missense split; override the directory with $CLINVAR_AA_DIR.
-my $CLINVAR_AA_DIR = $ENV{CLINVAR_AA_DIR} // '/home/edo/gbackbone/input-clinvar';
+my $CLINVAR_AA_DIR = $ENV{CLINVAR_AA_DIR} // '';   # set CLINVAR_AA_DIR in site.env (README section 0.6)
 my $PLP_resid = load_clinvar_aa("$CLINVAR_AA_DIR/clinvar.MANE_missense.PLP.tsv");
 my $BLB_resid = load_clinvar_aa("$CLINVAR_AA_DIR/clinvar.MANE_missense.BLB.tsv");
 my $CLINVAR_AA_ON = (keys %$PLP_resid) ? 1 : 0;
@@ -309,7 +309,9 @@ if ($CLINVAR_AA_ON) {
     printf "ClinVar AA evidence (PS1/PM5): %d P/LP residues, %d B/LB residues\n",
         scalar(keys %$PLP_resid), scalar(keys %$BLB_resid);
 } else {
-    warn "WARN: ClinVar missense P/LP resource not found under $CLINVAR_AA_DIR — PS1/PM5 disabled\n";
+    warn "WARN: ClinVar missense P/LP resource not found"
+       . ($CLINVAR_AA_DIR ? " under $CLINVAR_AA_DIR" : " (CLINVAR_AA_DIR unset)")
+       . " — PS1/PM5 disabled. See README section 0.6.\n";
 }
 
 #############################################################################

@@ -20,6 +20,7 @@ set -euo pipefail
 # Working directory holds the *.germline.vep.vcf.gz data + reference files
 # (defaults to this script's own directory; override with $WORKDIR).
 GENES="${1:-}"
+_CF_SITE="$(dirname "$(readlink -f "$0")")/site.sh"   # resolve before cd
 cd "${WORKDIR:-$(dirname "$(readlink -f "$0")")}"
 
 # Optional: force specific sample(s) as proband, overriding filename-based
@@ -31,12 +32,15 @@ GENES_ARGS=()
 [[ -n "$GENES" ]] && GENES_ARGS=(--list "$GENES")   # filtering_r.pl takes the panel via -l/--list only
 FWD=("${PROBAND_ARGS[@]+"${PROBAND_ARGS[@]}"}" "${GENES_ARGS[@]+"${GENES_ARGS[@]}"}")
 
-# Configurable environment (defaults match the original setup).
-source "${CONDA_BASE:-$HOME/miniconda3}/etc/profile.d/conda.sh"
-conda activate "${PANGOLIN_ENV:-pangolin}"
+# Configurable environment — all paths come from site.sh (override in an untracked
+# site.env; see README section 0). Sourced via the SCRIPT's real directory because we
+# have already cd'd into $WORKDIR above.
+source "$_CF_SITE"
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$PANGOLIN_ENV"
 
-FA="${PANGOLIN_FASTA:-$HOME/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa}"
-DB="${PANGOLIN_DB:-$HOME/vep_refs/pangolin/gencode.v38.annotation.db}"
+FA="$PANGOLIN_FASTA"
+DB="$PANGOLIN_DB"
 
 echo "===== Pass 1: emit Pangolin candidate inputs ====="
 perl filtering_r.pl "${FWD[@]}"
