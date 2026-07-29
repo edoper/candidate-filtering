@@ -17,7 +17,7 @@ inheritance and recessive context for **downstream manual curation**.
 | File | Purpose |
 |------|---------|
 | `vep_annotate.sh` | Annotate a germline VCF with Ensembl VEP (plugins + custom gnomAD & ClinVar), splitting multiallelics first. Produces `*.germline.vep.vcf.gz`. |
-| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. Also the **single-variant consult** entry point (`-v`/`-l`): annotate one or a few variants (coords or HGVS) from scratch and report everything, gates bypassed. |
+| `filtering_r.pl` | The filtering algorithm. Reads the annotated VCF, applies gates, writes `<proband>.<panel>.candidatos`. Also the **single-variant consult** entry point (`-v`, or `--lookup` for a pre-annotated VCF): annotate one or a few variants (coords or HGVS) from scratch and report everything, gates bypassed. |
 | `parse_pangolin.pl` | Convert Pangolin output into a per-variant splice-score map (`<proband>.<panel>.pangolin.tsv`). |
 | `run_filtering.sh` | End-to-end driver: emit candidates → score with Pangolin → final filtering. |
 | `site.sh` | One place for every external path (VEP, plugin data, Pangolin, ClinVar AA tables). Override in an untracked `site.env` — see [Setup](#setup). |
@@ -112,17 +112,20 @@ the most evidence arms). `--lookup` consults still report every annotation.
 A surviving variant must trip **one or more** of these. Each is independent; a `kept_by`
 column records which fired.
 
-| Arm | Threshold |
-|-----|-----------|
-| CADD | `$CADD_MIN` = 25.3 |
-| AlphaMissense | `am_score` ≥ `$AM_MIN` = 0.792 (ClinGen PP3) |
-| EVE pathogenic | `eve_class` is Pathogenic |
-| REVEL | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
-| Pangolin (splice) | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
-| ClinVar P/LP | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
-| PS1 / PM5 | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
-| LoF | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
-| AR_hom | **Homozygous, protein-altering** (missense / inframe / stop_lost / start_lost) variant in a **recessive (AR/XLR) panel gene**, with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
+The **`kept_by` token** column is the literal string written to the output — grep on that, not on
+the arm's prose name.
+
+| Arm | `kept_by` token | Threshold |
+|-----|-----------------|-----------|
+| CADD | `CADD` | `$CADD_MIN` = 25.3 |
+| AlphaMissense | `AM` | `am_score` ≥ `$AM_MIN` = 0.792 (ClinGen PP3) |
+| EVE pathogenic | `EVE` | `eve_class` is Pathogenic |
+| REVEL | `REVEL` | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
+| Pangolin (splice) | `Pangolin` | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
+| ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
+| PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
+| LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
+| AR_hom | `AR_hom` | **Homozygous, protein-altering** (`missense` / `inframe_*` / `stop_lost` / `start_lost` / `protein_altering_variant`) variant in a gene whose panel **MOI contains AR or XLR** — this includes dual `AD, AR` genes, unlike the *pure*-recessive carrier logic below — with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
 
@@ -226,7 +229,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`) | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
-  | **PM6** | **Assumed** de novo (DN unconfirmed / duo) | parental GT |
+  | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM` **in a gene whose panel MOI contains AD or XL**. A duo-ambiguous call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — never earns PM6 | parental GT + panel MOI |
   | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). Counts **independently of PP3** (both are legitimate separate ACMG lines — gene-level intolerance vs variant-level prediction), but **suppressed when BP4 fires** (a benign-predicted variant gets no gene-level pathogenic support). | gnomAD v4.1.1 constraint |
   | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below) | AlphaMissense / REVEL |
   | **PP5** | This variant is reported pathogenic in ClinVar | ClinVar |
@@ -240,11 +243,11 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **BS2** | ≥ 10 homozygotes in gnomAD | gnomAD v4.1 |
   | **BP4** | Computational benign, graded (see below) | AlphaMissense / REVEL |
   | **BP6** | This variant is reported benign in ClinVar (≥1★) | ClinVar |
-  | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) | Pangolin |
+  | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2). ⚠️ A **missing** Pangolin score is treated as 0, so in a run without Pangolin every synonymous variant earns BP7 — see [Notes & limitations](#notes--limitations) | Pangolin |
 
   **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control), PM1
-  (hotspot/domain), PM3 (in trans), PP1/BS4 (segregation), PP2 (missense-constrained gene),
-  PP4 (phenotype specificity), BP1/BP2/BP3/BP5.
+  (hotspot/domain), PM3 (in trans), PP1/BS4 (segregation), PP4 (phenotype specificity),
+  BP1/BP2/BP3/BP5.
 
   **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
   gene + protein residue + amino-acid change, requiring **≥1 review star**; a match also reported B/LB is
@@ -255,10 +258,13 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013): PP3 supp ≥0.644 / mod ≥0.773 /
   strong ≥0.932; BP4 supp ≤0.290 / mod ≤0.183 / strong ≤0.016) — with a **REVEL direction-conflict
   veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
-  **Not a final clinical call**: PM1/PP2 not assessed; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5
-  rely on ClinVar AA matching (no independent re-curation, and PS1 may overlap PP5 for the same variant).
+  **Not a final clinical call**: PM1 not assessed; PP2 is gene-level constraint only (no domain/hotspot
+  reasoning); PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching (no independent
+  re-curation, and PS1 may overlap PP5 for the same variant).
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
-  `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in a ≥5 homopolymer — error-prone),
+  `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in **or adjacent to** a ≥5 bp
+  homopolymer — the reference is scanned ±12 bp around the position, so a nearby run also flags —
+  error-prone),
   `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `cohort_artifact` (recurrent
   gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped).
@@ -272,7 +278,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 ## Secondary findings (ACMG SF v3.2)
 
 The **81 ACMG SF v3.2 genes** (`acmg_sf_v3.2.txt`) are **always** scanned, independent of the
-candidate `--genes` panel, with a **stricter** gate than candidates. Findings are written into
+candidate `-l`/`--list` panel, with a **stricter** gate than candidates. Findings are written into
 the **same** `.candidatos` output, flagged **`GDV = Incidental`** (with `Association`/`MOI` from the
 ACMG table and `kept_by` = the evidence tier). Curators split primary vs secondary on the GDV column.
 
@@ -353,6 +359,12 @@ cd ensembl-vep && perl INSTALL.pl        # choose the homo_sapiens_vep GRCh38 ca
 
 `INSTALL.pl` also installs plugins; select **LoF (LOFTEE), REVEL, AlphaMissense, EVE, CADD**. The
 filter needs `bcftools` too (`conda install -c bioconda bcftools htslib`).
+
+**LOFTEE also needs `Bio::DB::HTS` and the htslib shared library it links against.** `vep_annotate.sh`
+puts `$PERL5LIB_EXTRA` on `PERL5LIB` and `LD_PRELOAD`s `$HTSLIB_SO`; both default to the developed-against
+layout (`$VEP_PLUGINS/loftee:$HOME/perl5/lib/perl5` and `$HOME/htslib/libhts.so`). If your htslib lives
+elsewhere, set `HTSLIB_SO` in `site.env` — the preload is skipped silently when the file is missing, and
+LOFTEE then fails at run time rather than at startup.
 
 ### 0.4 — Plugin data files
 
@@ -451,6 +463,25 @@ bash run_filtering.sh
 #    → EPIC280-P.g4e.candidatos
 ```
 
+### `filtering_r.pl` command-line flags
+
+The complete accepted set — **anything else is a hard error** (there is no positional argument).
+Every value-taking flag also accepts the `--flag=value` form.
+
+| Flag | Value | What it does |
+|------|-------|--------------|
+| `-l`, `--list` | genes file | Candidate-gene panel, replacing `g4e-2026.txt`. **This is the only way to set the panel**, and it also sets the output `<panel>` tag. |
+| `-v`, `--variant` | variant | Single-variant consult; **repeatable** for several variants. Coords or `ENST…` HGVS. |
+| `--lookup` | annotated VCF | Consult a pre-annotated `*.germline.vep.vcf.gz` directly. Mutually exclusive with `-v`. |
+| `-p`, `--proband` | sample base-name | Force a sample as proband, overriding filename auto-discovery. **Repeatable.** |
+| `--all-transcripts` | — | Consult mode: report every transcript, not just MANE. |
+| `--keep-vcf` | — | Consult mode: keep the annotated VCF instead of deleting it. |
+| `--no-splice` | — | Consult mode: skip the inline Pangolin run. |
+| `--keep-ar-carriers` | — | Surface strong solitary AR/XLR carriers (carrier-only tier) instead of dropping them. |
+| `--keep-cohort-artifacts` | — | Tag cohort recurrent artifacts `qc_flag=cohort_artifact` instead of dropping them. |
+| `--selftest` | — | Family-discovery self-test; exits. Needs no data. |
+| `--selftest-cohort` | — | Cohort recurrent-artifact self-test; exits. Needs no data. |
+
 ### Custom gene list (genes of interest)
 
 By default the panel is `g4e-2026.txt`. To restrict to a different gene set, pass a
@@ -472,7 +503,7 @@ perl filtering_r.pl -l my_genes.txt       # filtering only
   so different gene lists produce **side-by-side** results instead of overwriting. Pangolin
   scratch is namespaced the same way but deleted after each run (see [Splice scoring](#splice-scoring-pangolin)).
 
-### Single-variant lookup (`filtering_r.pl -v` / `-l`)
+### Single-variant lookup (`filtering_r.pl -v` / `--lookup`)
 
 To **consult one (or a few) variants** and see *everything the pipeline can say about each* —
 every predictor, ClinVar, gnomAD, PS1/PM5, the triage ACMG class, QC flags — in the **same
@@ -497,8 +528,17 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' --keep-vcf          # keep the annota
 
 Output: the **transposed, human-readable view only** — one `field <TAB> value` line per column
 (the transposed view, not the TSV cohort table) — written to `Lookup.<tag>.<panel>.candidatos` and echoed to stdout.
-`<tag>` is the variant id (`chr-pos-ref-alt`) for a single `-v`, else `<first-id>+<N>`. (A
-pre-annotated VCF can still be analyzed directly with `--lookup <file.germline.vep.vcf.gz>`.)
+`<tag>` is the variant id (`chr-pos-ref-alt`) for a single `-v`; for several, it is
+`<first-id>_<N>` where **`N` is the number of *additional* variants** (`-v` count − 1) — the tag is
+sanitized to `[A-Za-z0-9._-]`, so e.g. two variants starting at `chr9-6644629-T-C` give
+`Lookup.chr9-6644629-T-C_1.g4e.candidatos`.
+
+> ⚠️ **The `Lookup.` prefix only applies to `-v`.** A pre-annotated VCF can also be analyzed directly
+> with `--lookup <file.germline.vep.vcf.gz>`, but that path names its output after the **VCF's
+> basename**, not with a `Lookup.` prefix — so `--lookup EPIC280-P.germline.vep.vcf.gz` writes
+> `EPIC280-P.g4e.candidatos`, **the same filename a normal cohort run produces, overwriting it** with
+> the transposed lookup view. Run `--lookup` in a scratch directory, or copy the result out
+> immediately.
 
 - The variant(s) are built **sites-only** (no sample), so genotype columns (zygosity/GT/DP/GQ/AB)
   are blank and `inheritance = NA`; every annotation-derived field is still computed.
@@ -512,14 +552,20 @@ pre-annotated VCF can still be analyzed directly with `--lookup <file.germline.v
   `$ENSEMBL_REST`. The local cache is Ensembl (not RefSeq), so use `ENST…` HGVS, not `NM_…`.
   The HGVS path needs `curl` + `jq`; the coordinate path needs neither.
 - **Splicing is scored too.** Because a single-variant consult should report *everything*,
-  `-v`/`--lookup` runs **Pangolin** on the variant inline (from the normalized annotated VCF) and
-  fills `pangolin_score` + the splice rescue arm — no separate two-pass step needed. It **degrades
+  **`-v`** runs **Pangolin** on the variant inline (from the normalized annotated VCF) and
+  fills `pangolin_score` + the splice rescue arm — no separate two-pass step needed. **`--lookup` on a
+  pre-annotated VCF does *not*** run Pangolin: it only picks up an existing
+  `<base>.<panel>.pangolin.tsv` **in the current working directory** (the VCF's own directory is
+  stripped, so a score map sitting next to a VCF given by absolute path is *not* found), and
+  otherwise leaves `pangolin_score` blank. It **degrades
   gracefully**: if the `pangolin` conda env or references are missing, or Pangolin fails, it warns
   and leaves `pangolin_score` blank rather than aborting. Pass **`--no-splice`** to skip it (faster,
   and avoids the conda/GPU dependency on air-gapped hosts).
 - Mechanically: build a sites-only VCF → `vep_annotate.sh` (full annotation) → Pangolin (unless
-  `--no-splice`) → report-everything readable output. The annotated VCF + all splice scratch are
-  removed afterward unless `--keep-vcf`.
+  `--no-splice`) → report-everything readable output. The splice scratch and the temp dir are
+  **always** removed afterward; **`--keep-vcf` keeps only the annotated VCF**
+  (`Lookup.<tag>.germline.vep.vcf.gz` + index + `_summary.html`). The splice score itself is already
+  in the `.candidatos` output, so nothing is lost.
 
 ### Forcing a proband
 
@@ -557,6 +603,26 @@ creating an untracked **`site.env`** beside it (see [Setup 0.2](#02--tell-the-re
 | `PANGOLIN_ENV` | `pangolin` | Pangolin |
 | `PANGOLIN_FASTA` | `$VEP_REFS/pangolin/GRCh38.primary_assembly.genome.fa` | Pangolin |
 | `PANGOLIN_DB` | `$VEP_REFS/pangolin/gencode.v38.annotation.db` | Pangolin |
+| `PERL5LIB_EXTRA` | `$VEP_PLUGINS/loftee:$HOME/perl5/lib/perl5` | annotation — extra Perl libs VEP/LOFTEE need |
+| `HTSLIB_SO` | `$HOME/htslib/libhts.so` | annotation — `LD_PRELOAD`ed so LOFTEE's `Bio::DB::HTS` links (skipped silently if the file is absent) |
+
+Those are the variables `site.sh` defines, and the ones its export-wins-over-`site.env` precedence
+loop protects. The rest below are read directly by the individual scripts. The four `*_VCF` /
+`CADD_*` paths **can still be set in `site.env`** (it is sourced into the same shell), they simply
+aren't covered by that precedence loop; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles
+are environment-only and belong on the command line:
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `WORKDIR` | the repo directory | `run_filtering.sh` — directory holding the `*.germline.vep.vcf.gz` inputs |
+| `PROBAND` | *(empty)* | `run_filtering.sh` — space-separated sample(s) forwarded as `--proband` |
+| `GNOMAD_VCF` | `$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz` | `vep_annotate.sh` |
+| `CLINVAR_VCF` | `$VEP_REFS/clinvar/clinvar.chr.vcf.gz` | `vep_annotate.sh` |
+| `CADD_SNV` | `$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz` | `vep_annotate.sh` |
+| `CADD_INDEL` | `$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz` | `vep_annotate.sh` |
+| `ENSEMBL_REST` | `https://rest.ensembl.org` | `filtering_r.pl` — HGVS→coordinate recoding; point at a private mirror on an air-gapped host |
+| `KEEP_AR_CARRIERS` | *(unset)* | `filtering_r.pl` — same as `--keep-ar-carriers` |
+| `KEEP_COHORT_ARTIFACTS` | *(unset)* | `filtering_r.pl` — same as `--keep-cohort-artifacts` |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
 `$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ`) are
@@ -581,6 +647,11 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
   founder / bottleneck alleles — which carry a gnomAD footprint — are preserved. For a strongly
   founder-enriched cohort where a *private* founder allele could plausibly reach 25% while being
   gnomAD-absent, review the per-run drop log or run with `--keep-cohort-artifacts`.
+- **BP7 without Pangolin:** a missing `pangolin_score` is treated as 0, so a synonymous variant earns
+  BP7 (benign supporting) even when splicing was never scored. Running `filtering_r.pl` on its own —
+  a supported mode (see [Setup 0.7](#07--pangolin-splice-scoring-optional-but-recommended)) — therefore
+  applies BP7 to *every* synonymous variant on no evidence. Use `run_filtering.sh` when the ACMG class
+  of synonymous variants matters, or disregard BP7 in Pangolin-less runs.
 - This is a **triage tool to feed manual curation**, not an automated classifier.
 
 ## Data privacy

@@ -52,6 +52,7 @@ bash run_filtering.sh my_genes.txt    # custom genes-of-interest list (forwarded
 # Filtering only (no Pangolin)
 perl filtering_r.pl                   # default panel
 perl filtering_r.pl -l my_genes.txt   # custom panel (-l/--list is the ONLY way; no positional arg)
+                                      # NOTE: -l is the PANEL flag, never a lookup entry point
 perl filtering_r.pl --selftest        # built-in family-discovery self-test
 
 # Force a specific sample as proband (overrides filename auto-discovery)
@@ -118,8 +119,10 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   predictors (calibrated mostly on dominant/het effects). **Coding-only** (intronic/splice → Pangolin arm;
   LoF → LoF arm) + **AB>0.75** (guards false-hom) keep it specific — else it floods on benign homozygous
   polypyrimidine/intron variants. `BS1/BS2/BA1` still flag benign-leaning ones.
-- **ACMG output is triage-grade**, not a final clinical call (PM1/PP2 not assessed; PVS1 doesn't
-  verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching). PM5 also fires for a
+- **ACMG output is triage-grade**, not a final clinical call (PM1 not assessed; PP2 is gene-level
+  constraint only, no domain/hotspot reasoning; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely
+  on ClinVar AA matching). **BP7 treats a missing `pangolin_score` as 0**, so a Pangolin-less run
+  (`filtering_r.pl` alone) tags every synonymous variant BP7 on no evidence. PM5 also fires for a
   single-codon in-frame deletion when a P/LP missense exists at the deleted residue (curatorial
   extension of PM5 beyond missense; tagged `(in-frame del)` in the `clinvar_aa` column).
 - **De-novo can't be confirmed here** — parent VCFs are variant-only (no reference depth), so `DN`
@@ -133,7 +136,8 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   bypasses all gates to report variants in full; all changes are `$LOOKUP`-guarded so normal runs
   are unaffected. `-v` builds a sites-only VCF, runs `vep_annotate.sh`, **and runs Pangolin inline**
   (so `pangolin_score` + the splice rescue arm work for a single variant too) — removing the
-  annotated VCF + splice scratch afterward unless `--keep-vcf`. Pangolin degrades gracefully (warns,
+  annotated VCF afterward unless `--keep-vcf` (splice scratch is ALWAYS removed; `--lookup` on a
+  pre-annotated VCF does NOT run Pangolin at all). Pangolin degrades gracefully (warns,
   leaves score blank) if the env/refs are absent; **`--no-splice`** skips it. Coordinates are fully
   offline; **HGVS resolution calls the Ensembl REST API** (only the variant string, never patient
   data; needs `curl`+`jq`) and needs `ENST…` ids (the cache is Ensembl, not RefSeq).
@@ -157,7 +161,7 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **BA1** / **BS1** / **BS2** | gnomAD AF ≥ 5% / ≥ 1% / ≥ 10 homozygotes |
 | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) |
 
-**Not evaluated (manual curation):** PS3/BS3, PS4, PM1, PM3, PP1/BS4, PP2, PP4, BP1/BP2/BP3/BP5.
+**Not evaluated (manual curation):** PS3/BS3, PS4, PM1, PM3, PP1/BS4, PP4, BP1/BP2/BP3/BP5.
 
 ## Dependencies
 
