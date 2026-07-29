@@ -107,6 +107,16 @@ the most evidence arms). `--lookup` consults still report every annotation.
 | Gene panel | `g4e-2026.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
 | Rarity (MOI-aware) | gnomAD joint AC/AN | AF = AC/AN×100 ≤ threshold: **dominant `$FREQ_AD`=0.01%**, **recessive `$FREQ_AR`=1.0%** (MOI contains AR/XLR) |
 
+> **ClinVar exemption.** A panel-gene variant classified **Pathogenic/Likely-pathogenic in ClinVar
+> with ≥1 review star** satisfies Stage 1 regardless of the **rarity** and **consequence** gates
+> (MANE and panel membership still apply). An established classification is evidence in its own
+> right, and both gates would otherwise discard it before any evidence is read: a **founder allele**
+> in a bottlenecked population can sit above the frequency ceiling, and a **pathogenic non-coding or
+> synonymous** variant carries a consequence term that is not whitelisted. The variant is reported
+> with whatever frequency-based benign criteria it earns (`BS1`/`BA1`), so the curator sees the
+> tension rather than losing the variant. This mirrors the ACMG-SF path, which exempts the same
+> tier for the same reason.
+
 ### Stage 2 — Inclusion / rescue gate (at least ONE, OR)
 
 A surviving variant must trip **one or more** of these. Each is independent; a `kept_by`
@@ -123,7 +133,7 @@ the arm's prose name.
 | REVEL | `REVEL` | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
 | Pangolin (splice) | `Pangolin` | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
 | ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
-| PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
+| PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
 | AR_hom | `AR_hom` | **Homozygous, protein-altering** (`missense` / `inframe_*` / `stop_lost` / `start_lost` / `protein_altering_variant`) variant in a gene whose panel **MOI contains AR or XLR** — this includes dual `AD, AR` genes, unlike the *pure*-recessive carrier logic below — with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
@@ -135,10 +145,14 @@ All thresholds are single constants at the top of `filtering_r.pl`.
 - **Inheritance** uses *parental genotype* (carrier = non-ref GT, not mere site presence):
   `IB / IM / IF / DN` in a full trio; duo-ambiguous `DN/IF` (mother-only) or `DN/IM`
   (father-only); `NA` for a singleton.
-- **`recessive_flag`** per gene (computed for **recessive-capable genes only** — AR/XLR/dual;
-  a purely dominant gene never gets one, so two independent hets are not mislabeled comp-het):
-  `HOM` (homozygous), `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio
-  only), `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton), or `carrier-only` (see below).
+- **`recessive_flag`** — the recessive picture is worked out **per gene** (for **recessive-capable
+  genes only** — AR/XLR/dual; a purely dominant gene never gets one, so two independent hets are not
+  mislabeled comp-het), but the label written to each row **describes that row**: `HOM` on a
+  homozygous row, `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio only) or
+  `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton) on the heterozygous rows that constitute it,
+  or `carrier-only` (see below). A heterozygous variant sitting in a gene that is homozygous for some
+  *other* variant is therefore left blank rather than labelled `HOM` — the flag never contradicts the
+  row's own `zygosity`. The gene-level verdict still governs which rows survive the carrier drop.
 - **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`) are treated as
   **dominant** for the carrier logic: a **solitary het passes through as a normal candidate**
   (`recessive_flag` empty), while a genuine `HOM`/comp-het still gets the recessive flag. This
@@ -167,7 +181,7 @@ input samples counting, per `chr-pos-ref-alt`, how many carry the ALT and their 
 A candidate is then **dropped** when it is **both**:
 
 1. **cohort-recurrent** — carried by ≥ `$COHORT_MAX_FRAC` (25%) of the cohort, and
-2. **gnomAD-absent** — gnomAD AF < `$COHORT_ART_FREQ` (0.01%, i.e. ~1 in 10,000).
+2. **gnomAD-absent** — gnomAD joint **AC = 0**, i.e. the allele is wholly unobserved.
 
 This targets systematic technical artifacts — reference/mapping errors in paralog-rich or
 low-complexity genes (e.g. the recurrent `SYNE1` / `KMT2C` sites that appear, gnomAD-absent, in a
@@ -175,8 +189,13 @@ large fraction of a cohort). **Both conditions are required, and that conjunctio
 discriminator:** recurrence alone would remove true **founder / bottleneck** alleles, but a real
 founder allele frequent enough to reach a quarter of the cohort leaves a footprint in gnomAD's large
 Admixed-American sample — so requiring gnomAD-absence keeps the filter founder-safe (important for
-under-represented ancestries). Every drop is logged (`cohort_artifact drop:` lines with carrier
-count + hom/het breakdown, and a per-proband total).
+under-represented ancestries). Absence is tested as **AC = 0** rather than against a frequency
+ceiling, because a ceiling anywhere near `$FREQ_AD` is already implied by the Stage 1 rarity gate for
+dominant genes: recurrence would then be the only condition still doing work, and the founder
+protection would be nominal. Requiring a literal zero keeps the second condition meaningful under
+every mode of inheritance — **any** gnomAD observation, even a single allele, spares the variant.
+Every drop is logged (`cohort_artifact drop:` lines with carrier count + hom/het breakdown, and a
+per-proband total).
 
 - **OFF** for single-variant (`-v` / `--lookup`), forced/single proband (`--proband`), and any run of
   fewer than `$COHORT_MIN` probands — a per-variant or per-proband consult has no cohort to compare
@@ -185,8 +204,7 @@ count + hom/het breakdown, and a per-proband total).
   `qc_flag=cohort_artifact`, instead of dropping — for a founder-enriched cohort, review the drop log
   (a genuinely private founder allele would surface there and can be kept this way).
 - Self-test (synthetic cohort, no reference files needed): `perl filtering_r.pl --selftest-cohort`.
-- Thresholds are the `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ` constants at the top of
-  `filtering_r.pl`.
+- Thresholds are the `$COHORT_MIN` / `$COHORT_MAX_FRAC` constants at the top of `filtering_r.pl`.
 
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
@@ -200,6 +218,10 @@ gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
 zygosity, GT, DP, GQ, AB, GT_SOURCE, NCALLERS, CONF,
 inheritance, recessive_flag, kept_by,
 acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
+
+`start`/`end` are 1-based and span the **REF allele** (`end` = `start` + len(`ref`) − 1), so an indel
+reports its full footprint and the row round-trips into the 5-field `chr-start-end-ref-alt` form the
+consult mode accepts. For an SNV the two are equal.
 
 `hgvs` combines HGVSc and HGVSp as `TRANSCRIPT:c.… (p.…)` (the `ENSP…:` protein-accession
 prefix is stripped; non-coding/synonymous variants show only the `c.` part).
@@ -224,7 +246,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | Criterion | What triggers it | Source |
   |---|---|---|
   | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
-  | **PS1** | Same amino-acid change is ClinVar P/LP (≥1★) | ClinVar MANE-missense |
+  | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
   | **PS2** | De novo **confirmed** in a trio (`inheritance=DN`, clean genotype) | parental GT |
   | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`) | consequence |
@@ -250,8 +272,13 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   BP1/BP2/BP3/BP5.
 
   **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
-  gene + protein residue + amino-acid change, requiring **≥1 review star**; a match also reported B/LB is
-  tagged **`(conflicting)`** (still counted — flag for manual review) and detailed in the `clinvar_aa` column.
+  gene + protein residue + amino-acid change, requiring **≥1 review star**. The resource is indexed by
+  the **source variant** (`chr-pos-ref-alt`) behind each amino-acid change, which is what lets PS1
+  exclude the record belonging to the variant being classified — PS1 rests on a *previously
+  established* variant, so a self-match would count one submission twice, as PS1 and again as PP5.
+  PM5 is unaffected: a different amino-acid change is necessarily a different variant. A match that is
+  also reported B/LB is tagged **`(conflicting)`** (still counted — flag for manual review) and
+  detailed in the `clinvar_aa` column.
   **PP3/BP4 come from a single calibrated predictor**, graded **Supporting/Moderate/Strong**:
   **AlphaMissense** primary ([Bergquist 2025](https://doi.org/10.1016/j.gim.2025.101402): PP3
   supp ≥0.792 / mod ≥0.906 / strong ≥0.990; BP4 supp ≤0.169 / mod ≤0.099), **REVEL** fallback
@@ -260,7 +287,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
   **Not a final clinical call**: PM1 not assessed; PP2 is gene-level constraint only (no domain/hotspot
   reasoning); PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching (no independent
-  re-curation, and PS1 may overlap PP5 for the same variant).
+  re-curation; PS1 and PP5 can still co-occur when a *different* variant supplies the amino-acid match).
 - **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
   `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in **or adjacent to** a ≥5 bp
   homopolymer — the reference is scanned ±12 bp around the position, so a nearby run also flags —
@@ -622,7 +649,7 @@ same shell; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles belong
 | `KEEP_COHORT_ARTIFACTS` | *(unset)* | `filtering_r.pl` — same as `--keep-cohort-artifacts` |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
-`$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_ART_FREQ`) are
+`$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC`) are
 edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
 `--keep-cohort-artifacts` / `KEEP_COHORT_ARTIFACTS` toggle the two drop rules.
 
@@ -630,6 +657,8 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
 
 ## Notes & limitations
 
+- The rarity gate binds only variants with **no established ClinVar classification**; a P/LP call
+  with ≥1 review star is exempt (Stage 1), so a founder allele above the ceiling is still reported.
 - `$FREQ_AR` = 1% is deliberately permissive (sensitivity); solitary het carriers in pure
   recessive genes are dropped by default (surfaced only via `--keep-ar-carriers`), so the permissive threshold
   matters only for variants that pair up. `gnomAD_nhomalt` surfaces high-homozygote variants

@@ -26,7 +26,11 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #                                                                      [#2]
 #  * Structural gates (AND): MANE transcript + whitelisted consequence
 #    (matched per-&-atom) + panel gene + rare. Consequence is split on '&' so
-#    unanticipated compound terms are not silently dropped.            [#1]
+#    unanticipated compound terms are not silently dropped. A panel-gene variant
+#    that is ClinVar P/LP with >=1 review star is EXEMPT from the rarity and
+#    consequence gates (MANE + panel still required), so founder alleles above the
+#    AF ceiling and pathogenic non-coding/synonymous variants are not discarded
+#    before any evidence arm runs.                                     [#1]
 #  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
 #    gnomAD AF than dominant genes.                                    [#6]
 #  * Inclusion (rescue) gate (OR): CADD>=25.3, AlphaMissense>=0.792, EVE path,
@@ -75,7 +79,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    criteria: PVS1, PS2/PM6, PM2/PM4, PP5, BA1/BS1/BS2/BP6/BP7.           [#2]
 #  * Cohort recurrent-artifact filter (internal panel-of-normals): for a real
 #    cohort auto-analyzed together (>= $COHORT_MIN probands), a candidate carried by
-#    >= $COHORT_MAX_FRAC of samples AND absent from gnomAD (AF < $COHORT_ART_FREQ) is
+#    >= $COHORT_MAX_FRAC of samples AND absent from gnomAD (joint AC == 0) is
 #    a systematic technical artifact (paralog/low-complexity mismapping) and is
 #    dropped — both conditions required, so population bottlenecks / founder alleles
 #    (which carry a gnomAD footprint) are preserved. OFF for single-variant, forced/
@@ -133,7 +137,13 @@ my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 # a real founder allele frequent enough to reach a quarter of the cohort would
 # leave a footprint in gnomAD's large Admixed-American sample. So a variant is
 # dropped ONLY when it is BOTH cohort-recurrent (>= $COHORT_MAX_FRAC of samples) AND
-# gnomAD-absent (AF < $COHORT_ART_FREQ). Neither condition alone drops anything.
+# wholly absent from gnomAD (joint AC == 0). Neither condition alone drops anything.
+# Absence is tested as AC == 0 rather than against a frequency ceiling on purpose: a
+# ceiling at or above $FREQ_AD is already implied by the Stage-1 rarity gate for
+# dominant genes, which would leave recurrence as the only effective condition and
+# strip the founder-safety the second condition exists to provide. Requiring a
+# literal zero keeps that protection meaningful for every mode of inheritance —
+# any gnomAD footprint at all, however small, spares the variant.
 # Activates ONLY for a real cohort auto-analyzed together (>= $COHORT_MIN probands,
 # no forced selection): single-variant (-v/--lookup) and single/forced-proband
 # (--proband) runs never activate it, and trios/duos/small runs are untouched
@@ -143,7 +153,6 @@ my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 # genuinely private founder allele would surface there.
 my $COHORT_MIN      = 10;    # min cohort size to activate the filter (below -> OFF)
 my $COHORT_MAX_FRAC = 0.25;  # carried by >= this fraction of the cohort -> "recurrent"
-my $COHORT_ART_FREQ = 0.01;  # gnomAD AF (%) below this -> "absent from gnomAD" (1 in 10,000)
 
 # Ensembl REST endpoint for HGVS->coordinate recoding in -v variant mode
 # (override with $ENSEMBL_REST; point at a private mirror on an air-gapped host).
@@ -458,14 +467,15 @@ sub build_cohort_tally {
     return (\%ac, \%hom, \%het, $n);
 }
 
-# Pure artifact decision: carried by >= $COHORT_MAX_FRAC of the cohort AND gnomAD
-# AF (%) below $COHORT_ART_FREQ, with the cohort large enough (>= $COHORT_MIN) to be
+# Pure artifact decision: carried by >= $COHORT_MAX_FRAC of the cohort AND absent
+# from gnomAD (joint AC == 0), with the cohort large enough (>= $COHORT_MIN) to be
 # meaningful. Kept pure (no I/O) so run_cohort_selftest can exercise it directly.
 sub cohort_artifact_call {
-    my ($ac, $n, $freq) = @_;
+    my ($carriers, $n, $gnomad_ac) = @_;
     return 0 unless defined $n && $n >= $COHORT_MIN;
-    $ac ||= 0;
-    return (($ac / $n) >= $COHORT_MAX_FRAC && $freq < $COHORT_ART_FREQ) ? 1 : 0;
+    $carriers  ||= 0;
+    $gnomad_ac ||= 0;
+    return (($carriers / $n) >= $COHORT_MAX_FRAC && $gnomad_ac <= 0) ? 1 : 0;
 }
 
 # Is a consequence whitelisted? Pass if ANY '&'-separated atom is in the list.
@@ -553,8 +563,10 @@ sub _key_gt {
 
 # ClinVar amino-acid-level evidence for PS1/PM5, built from the MANE-missense
 # split (clinvar.MANE_missense.{PLP,BLB}.tsv). Returns a hashref keyed by
-# "GENE\tAApos\tRefAA" -> { AltAA => max_stars }, so a candidate's residue can be
-# checked for the SAME change (PS1) or a DIFFERENT pathogenic change (PM5). A
+# "GENE\tAApos\tRefAA" -> { AltAA => { chr-pos-ref-alt => stars } }, so a candidate's
+# residue can be checked for the SAME change (PS1) or a DIFFERENT pathogenic change
+# (PM5). The innermost level records WHICH variant contributed each classification,
+# which is what lets PS1 exclude the candidate's own ClinVar record (see aa_best_stars). A
 # single-codon in-frame deletion of that residue also triggers PM5 (it is a
 # different protein change at the same P/LP residue) — see the call site.
 sub load_clinvar_aa {
@@ -572,10 +584,35 @@ sub load_clinvar_aa {
         next if $gene eq "" || $aapos eq "" || $refAA eq "" || $altAA eq "" || $refAA eq $altAA;
         my $st = clinvar_stars($rev);
         my $k  = "$gene\t$aapos\t$refAA";
-        $resid{$k}{$altAA} = $st if !exists $resid{$k}{$altAA} || $st > $resid{$k}{$altAA};
+        # Keyed per SOURCE VARIANT (cols 3-6: Chr, PositionVCF, Ref, Alt), not just per
+        # amino-acid change. PS1 requires a PREVIOUSLY established variant, so the record
+        # belonging to the variant under classification has to be identifiable and
+        # excluded — otherwise a variant that is itself ClinVar P/LP matches its own
+        # submission and earns PS1 on top of PP5 from that one record.
+        my ($vchr,$vpos,$vref,$valt) = @f[2,3,4,5];
+        my $vid = (defined $vchr && defined $vpos && defined $vref && defined $valt)
+                ? "$vchr-$vpos-$vref-$valt" : "";
+        my $cur = $resid{$k}{$altAA}{$vid};
+        $resid{$k}{$altAA}{$vid} = $st if !defined $cur || $st > $cur;
     }
     close $fh;
     return \%resid;
+}
+
+# Best review-star count among the ClinVar records carrying one amino-acid change,
+# ignoring the record that IS the variant being classified ($self, "chr-pos-ref-alt";
+# pass "" to consider every record). Returns 0 when nothing qualifies, so a variant
+# whose only support is its own submission cannot earn PS1.
+sub aa_best_stars {
+    my ($by_variant, $self) = @_;
+    return 0 unless ref $by_variant eq 'HASH';
+    my $best = 0;
+    for my $vid (keys %$by_variant) {
+        next if defined $self && $self ne "" && $vid eq $self;
+        my $st = $by_variant->{$vid};
+        $best = $st if defined $st && $st > $best;
+    }
+    return $best;
 }
 
 # Is an INDEL in/adjacent to a homopolymer run (>=5)? Error-prone context. [#7]
@@ -1017,12 +1054,13 @@ sub run_cohort_selftest {
     $is->($het->{"chr1-100-A-G"} // 0,    0, "ART_HOM no hets");
     $is->($ac->{"chr2-200-C-T"}  // 0,   12, "ART_HET carriers");
     $is->($ac->{"chr3-300-G-A"}  // 0,    2, "REAL carriers");
-    # Drop decision (gnomAD AF is a percentage, matching the main loop's $freq).
-    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 0.0),  1, "ART_HOM dropped (recurrent+absent)");
-    $is->(cohort_artifact_call($ac->{"chr2-200-C-T"}, $n, 0.0),  1, "ART_HET dropped (recurrent+absent)");
-    $is->(cohort_artifact_call($ac->{"chr3-300-G-A"}, $n, 0.0),  0, "REAL kept (not recurrent)");
-    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 0.5),  0, "recurrent but in gnomAD -> kept (founder-safe)");
-    $is->(cohort_artifact_call(6, 8, 0.0),                       0, "small cohort (N<min) -> filter off");
+    # Drop decision (3rd arg is the gnomAD joint AC; absence means AC == 0).
+    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 0),    1, "ART_HOM dropped (recurrent+absent)");
+    $is->(cohort_artifact_call($ac->{"chr2-200-C-T"}, $n, 0),    1, "ART_HET dropped (recurrent+absent)");
+    $is->(cohort_artifact_call($ac->{"chr3-300-G-A"}, $n, 0),    0, "REAL kept (not recurrent)");
+    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 1),    0, "recurrent but AC=1 in gnomAD -> kept (founder-safe)");
+    $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 800),  0, "recurrent but common in gnomAD -> kept");
+    $is->(cohort_artifact_call(6, 8, 0),                         0, "small cohort (N<min) -> filter off");
     system("rm","-rf",$dir);
 
     my $fail = grep { !$_ } @ok;
@@ -1150,8 +1188,8 @@ foreach my $proband (@probands) {
             $cohort_on = ($cohort_n >= $COHORT_MIN) ? 1 : 0;
         }
         if ($cohort_on) {
-            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d%% of cohort AND gnomAD AF <%s%%%s\n",
-                   $cohort_n, int($COHORT_MAX_FRAC*100 + 0.5), $COHORT_ART_FREQ,
+            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d%% of cohort AND absent from gnomAD (AC=0)%s\n",
+                   $cohort_n, int($COHORT_MAX_FRAC*100 + 0.5),
                    $KEEP_COHORT_ARTIFACTS ? " (keep+tag mode)" : "";
         } else {
             printf "cohort artifact filter: OFF — %s\n",
@@ -1262,15 +1300,31 @@ foreach my $proband (@probands) {
             my $g_an = field(\@r,$i{g_an}); $g_an = ($g_an eq "") ? 0 : $g_an;
             my $freq = ($g_an > 0) ? ($g_ac/$g_an)*100 : 0;
 
+            my $clnsig    = field(\@r,$i{clnsig});
+            my $clnstars  = field(\@r,$i{clnstars});
+            my $clndn     = field(\@r,$i{clndn});
+
+            # An established ClinVar classification (P/LP with >=1 review star) is
+            # itself evidence, so it admits a panel-gene variant regardless of the MOI
+            # frequency ceiling and the consequence whitelist. Both gates otherwise
+            # fire BEFORE any evidence arm is consulted, silently discarding two
+            # classes of true positive: founder alleles that sit above the ceiling in
+            # a bottlenecked population, and pathogenic non-coding / synonymous
+            # variants whose consequence term is not whitelisted. The ACMG-SF path
+            # exempts the same tier for the same reason.
+            my $clinvar_established =
+                (clinvar_pathogenic($clnsig) && clinvar_stars($clnstars) >= 1) ? 1 : 0;
+
             # Candidate structural gate: panel gene + whitelisted consequence + rare
             # (MOI-aware: recessive genes tolerate higher carrier freq). [#1,#6]
             my $cand_structural = 0;
             my ($p_assoc,$p_moi,$p_gdv) = ("","","");
-            if ($in_panel && consequence_ok($consequence)) {
+            if ($in_panel && (consequence_ok($consequence) || $clinvar_established)) {
                 ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene};
                 $p_moi //= "";
                 my $recessive = moi_recessive($p_moi);
-                $cand_structural = ($freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
+                $cand_structural = ($clinvar_established
+                                 || $freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
             }
             if ($LOOKUP) {                 # report-everything: force structural pass
                 $cand_structural = 1;
@@ -1297,9 +1351,6 @@ foreach my $proband (@probands) {
             my $lof_flag  = field(\@r,$i{loftee_flags});
             my $g_nhom    = field(\@r,$i{g_nhom});
             my $g_filter  = field(\@r,$i{g_filter});
-            my $clnsig    = field(\@r,$i{clnsig});
-            my $clnstars  = field(\@r,$i{clnstars});
-            my $clndn     = field(\@r,$i{clndn});
             my $strand    = field(\@r,$i{strand});
             my $hgvsc     = field(\@r,$i{hgvsc});
             my $hgvsp     = field(\@r,$i{hgvsp});
@@ -1333,15 +1384,21 @@ foreach my $proband (@probands) {
                 my $k   = "$gene\t$paapos\t$refAA";
                 my $plp = $PLP_resid->{$k};
                 if ($plp) {
-                    if ($is_missense && exists $plp->{$altAA} && $plp->{$altAA} >= 1) {   # PS1
+                    # PS1 = a DIFFERENT variant producing the same amino-acid change is
+                    # P/LP, so this variant's own ClinVar record is excluded from the
+                    # match; self-matching would double-count one submission as PS1+PP5.
+                    my $ps1_st = $is_missense ? aa_best_stars($plp->{$altAA}, $my_id) : 0;
+                    if ($ps1_st >= 1) {                                                  # PS1
                         $aa_crit   = "PS1";
-                        $aa_detail = sprintf("PS1:%s p.%s%s%s (%d*)", $gene,$refAA,$paapos,$altAA,$plp->{$altAA});
+                        $aa_detail = sprintf("PS1:%s p.%s%s%s (%d*)", $gene,$refAA,$paapos,$altAA,$ps1_st);
                         $aa_conflict = 1 if exists $BLB_resid->{$k}{$altAA};
                     } else {                                                             # PM5
                         my ($balt,$bst) = ("",0);
                         for my $a (keys %$plp) {
                             next if $is_missense && $a eq $altAA;   # exact match is PS1, handled above
-                            ($balt,$bst) = ($a,$plp->{$a}) if $plp->{$a} >= 1 && $plp->{$a} > $bst;
+                            # A different AA change is necessarily a different variant.
+                            my $st = aa_best_stars($plp->{$a}, "");
+                            ($balt,$bst) = ($a,$st) if $st >= 1 && $st > $bst;
                         }
                         if ($balt ne "") {
                             $aa_crit = "PM5";
@@ -1485,16 +1542,17 @@ foreach my $proband (@probands) {
             # footprint). --keep-cohort-artifacts keeps it, tagged qc_flag instead.
             if ($cohort_on) {
                 my $cac = $cohort_ac->{$my_id} // 0;
-                if (cohort_artifact_call($cac, $cohort_n, $freq)) {
+                if (cohort_artifact_call($cac, $cohort_n, $g_ac)) {
                     if ($KEEP_COHORT_ARTIFACTS) {
                         push @qc, "cohort_artifact";
                         $qc_flag = join(";", @qc);
                     } else {
                         unless ($cohort_seen{$my_id}++) {
                             $stat{cohort_dropped}++;
-                            printf "  cohort_artifact drop: %-28s %-10s carriers=%d/%d (hom=%d het=%d) gnomAD_af=%.5f%%\n",
+                            printf "  cohort_artifact drop: %-28s %-10s carriers=%d/%d (hom=%d het=%d) gnomAD_AC=%s\n",
                                    $my_id, ($gene ne "" ? $gene : "."), $cac, $cohort_n,
-                                   ($cohort_hom->{$my_id} // 0), ($cohort_het->{$my_id} // 0), $freq;
+                                   ($cohort_hom->{$my_id} // 0), ($cohort_het->{$my_id} // 0),
+                                   ($g_ac ne "" ? $g_ac : "0");
                         }
                         next;   # drop this candidate row
                     }
@@ -1532,7 +1590,11 @@ foreach my $proband (@probands) {
                 class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar,
                 transcript=>$transcript, mane_select=>(field(\@r,$i{mane_select}) ne "" ? 1 : 0),
                 data=>{
-                    chr=>$chr, start=>$start, end=>$start, ref=>$ref, alt=>$alt,
+                    # END spans the REF allele (start + len(REF) - 1), so an indel reports
+                    # its true footprint and the row round-trips into the 5-field
+                    # chr-start-end-ref-alt form that resolve_variant accepts.
+                    chr=>$chr, start=>$start, end=>$start + length($ref) - 1,
+                    ref=>$ref, alt=>$alt,
                     gene=>$gene, strand=>$strand,
                     consequence=>$consequence, hgvs=>$hgvs,
                     revel=>$revel, eve_class=>$eve_class, eve_score=>$eve_score, cadd=>$cadd,
@@ -1641,11 +1703,23 @@ foreach my $proband (@probands) {
         } @rows;
     }
 
+    # The gene-level verdict decides which rows are KEPT (above); the label written to
+    # each row must still describe THAT row. A gene flagged HOM because one variant is
+    # homozygous must not stamp "HOM" onto an independent heterozygous variant in the
+    # same gene — the row would contradict its own zygosity column and read to a curator
+    # as a biallelic finding. Only a hom row is labelled HOM, and a CompHet label goes to
+    # the het rows that constitute it.
     for my $row (@rows) {
         my $gf = $gene_flag{$row->{gene}} // "";
         my $biallelic = ($row->{zyg} eq "hom" || $gf =~ /CompHet/);
+        # $gf is populated for recessive-capable genes ONLY, so testing it here keeps
+        # the existing invariant that a purely dominant gene never carries a recessive
+        # flag, while the zygosity test keeps the label true of THIS row.
+        my $own = ($gf eq "HOM"    && $row->{zyg} eq "hom") ? "HOM"
+                : ($gf =~ /CompHet/ && $row->{zyg} eq "het") ? $gf
+                :                                              "";
         $row->{data}{recessive_flag} =
-            $gf ne ""                                            ? $gf
+            $own ne ""                                           ? $own
           : (($row->{sf_ar} || $row->{rec_ar}) && !$biallelic)   ? "carrier-only"
           :                                                        "";
     }

@@ -77,6 +77,13 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
 - **Two-pass design:** if the Pangolin score map is absent, pass 1 emits the candidate list and
   stops; once scores exist, pass 2 writes the final table. `run_filtering.sh` does both.
 - **Annotations resolved by name** from the CSQ header — no hard-coded column indices.
+- **ClinVar exemption on the Stage-1 gates:** a panel-gene variant that is ClinVar P/LP with **≥1
+  review star** passes Stage 1 regardless of the rarity ceiling and the consequence whitelist (MANE +
+  panel still required). Without it, founder alleles above the AF ceiling and pathogenic non-coding /
+  synonymous variants are discarded before any evidence arm runs. It earns `BS1`/`BA1` as usual, so
+  the frequency tension is visible instead of silent. Same exemption the ACMG-SF path already had.
+- **`start`/`end` span the REF allele** (`end = start + len(ref) - 1`), so indels report their true
+  footprint and rows round-trip into the 5-field `chr-start-end-ref-alt` consult form.
 - **Outputs are namespaced by panel** (`<proband>.<panel>.candidatos`), so different gene lists
   produce side-by-side results instead of overwriting.
 - **Pangolin scratch is deleted after a successful pass 2** (recomputed every run — cheap, only
@@ -86,7 +93,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   never cite AN=0 as artifact evidence.
 - **Cohort recurrent-artifact filter (internal panel-of-normals):** when a real cohort is
   auto-analyzed together (≥ `$COHORT_MIN`=10 probands), a candidate carried by ≥ `$COHORT_MAX_FRAC`=25%
-  of the cohort **and** absent from gnomAD (AF < `$COHORT_ART_FREQ`=0.01%) is dropped as a systematic
+  of the cohort **and** absent from gnomAD (joint **AC = 0**) is dropped as a systematic
   technical artifact (paralog/low-complexity mismapping — e.g. the recurrent SYNE1/KMT2C sites).
   **Both** conditions are required: recurrence alone would hit founder alleles, but a true population
   bottleneck / under-represented ancestry allele carries a gnomAD footprint (gnomAD's large
@@ -105,6 +112,10 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   (LoF etc.) just because the gene also has a recessive mechanism. Only **pure** AR/XLR genes use the
   carrier path. The HOM/comp-het flag pass runs for **recessive-capable genes only**, so a purely dominant
   gene with two independent hets is never labelled `CompHet?`.
+- **`recessive_flag` is decided per gene but written per row.** The gene-level verdict governs which rows
+  survive the carrier drop; the label on each row describes that row — `HOM` only on a homozygous row,
+  `CompHet*` on the hets that constitute it. A het in a gene that is hom for a *different* variant is left
+  blank, so the flag never contradicts the row's own `zygosity` column.
 - **Recessive carrier drop (DEFAULT):** a solitary het in a **pure** AR/XLR gene that is not biallelic is
   **dropped** — a single het can't explain recessive disease; carrier states are clinical noise. **True
   comp-hets are unaffected:** a gene with ≥2 gate-passing hets is a biallelic `CompHet` and kept. Same drop
@@ -153,7 +164,7 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | Criterion | What triggers it |
 |---|---|
 | **PVS1** | LoF: LOFTEE = HC, or truncating consequence with LOFTEE ≠ LC |
-| **PS1** | Same AA change is ClinVar P/LP (≥1★) |
+| **PS1** | A **different** variant giving the same AA change is ClinVar P/LP (≥1★); the variant's own ClinVar record is excluded (the AA resource is indexed by source `chr-pos-ref-alt`), so a self-match cannot count one submission as both PS1 and PP5 |
 | **PS2** / **PM6** | De novo confirmed in trio (PS2) / assumed de novo, unconfirmed or duo (PM6) |
 | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) |

@@ -24,13 +24,20 @@ ok()  { echo "  PASS  $*"; }
 bad() { echo "  FAIL  $*"; fails=$((fails+1)); }
 
 # ─────────────── 1 + 2: the built-in self-tests ───────────────
+# Match "all N passed" without pinning N, so adding a case to a self-test does not
+# fail this wrapper; the count is reported, and any [FAIL] line trips it.
+selftest() { # <flag> <label>
+    local out; out=$(perl filtering_r.pl "$1" 2>&1)
+    local n; n=$(printf '%s' "$out" | sed -n 's/.*all \([0-9]\{1,\}\) passed.*/\1/p' | tail -1)
+    if [ -n "$n" ] && ! printf '%s' "$out" | grep -q '\[FAIL\]'; then ok "$2: $n/$n"
+    else bad "$2"; printf '%s\n' "$out" | tail -5; fi
+}
+
 echo "== 1. family auto-discovery =="
-if perl filtering_r.pl --selftest 2>&1 | grep -q 'all 9 passed'; then ok "naming self-test: 9/9"
-else bad "naming self-test"; perl filtering_r.pl --selftest 2>&1 | tail -5; fi
+selftest --selftest        "naming self-test"
 
 echo "== 2. cohort recurrent-artifact filter =="
-if perl filtering_r.pl --selftest-cohort 2>&1 | grep -q 'all 11 passed'; then ok "cohort self-test: 11/11"
-else bad "cohort self-test"; perl filtering_r.pl --selftest-cohort 2>&1 | tail -5; fi
+selftest --selftest-cohort "cohort self-test"
 
 # ─────────────── 3: reference data integrity ───────────────
 # These files ARE the clinical behaviour — a truncated download silently changes results.
@@ -59,10 +66,15 @@ AR_GENE=$(awk -F'\t' '!/^#/ && $3=="AR" {print $1; exit}' "$REPO/g4e-2026.txt")
 
 CSQ='SYMBOL|STRAND|Feature|MANE_SELECT|Consequence|HGVSc|HGVSp|cDNA_position|Amino_acids|Protein_position|REVEL|EVE_CLASS|EVE_SCORE|CADD_PHRED|am_class|am_pathogenicity|LoF|LoF_filter|LoF_flags|gnomADmin_AC_joint|gnomADmin_AN_joint|gnomADmin_AF_joint|gnomADmin_nhomalt_joint|gnomADmin_FILTER|ClinVar_CLNSIG|ClinVar_CLNREVSTAT|ClinVar_CLNDN'
 # one CSQ record: gene, consequence, CADD, AM score, gnomAD AC/AN
-csq() { # <gene> <consequence> <cadd> <am_score> <ac> <an>
-  printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||%s|likely_pathogenic|%s||||%s|%s|0|0|PASS|||' \
-         "$1" "$MANE_TX" "$MANE_TX" "$2" "$3" "$4" "$5" "$6"
+csq() { # <gene> <consequence> <cadd> <am_score> <ac> <an> [clnsig] [clnrevstat]
+  printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||%s|likely_pathogenic|%s||||%s|%s|0|0|PASS|%s|%s|' \
+         "$1" "$MANE_TX" "$MANE_TX" "$2" "$3" "$4" "$5" "$6" "${7:-}" "${8:-}"
 }
+STAR1='criteria_provided,_single_submitter'
+# A dual-inheritance gene (MOI lists both AD and AR): its solitary hets pass through
+# as dominant candidates, which is what the recessive_flag row-consistency check needs.
+DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO/g4e-2026.txt")
+[ -n "$DUAL_GENE" ] || { echo "  FAIL  no dual-inheritance gene in the panel"; exit 1; }
 {
   echo '##fileformat=VCFv4.2'
   echo '##contig=<ID=chr2,length=250000000>'
@@ -83,6 +95,20 @@ csq() { # <gene> <consequence> <cadd> <am_score> <ac> <an>
   printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq ZZZNOTAGENE missense_variant 30 0.99 0 0)"
   # DROP: solitary het in a pure AR gene = carrier state, not an explanation (default drop)
   printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$AR_GENE" missense_variant 30 0.99 0 0)"
+  # KEEP: ClinVar P/LP (1 star) at 5% in gnomAD — an established classification outranks
+  # the rarity ceiling, so founder alleles are not lost. No in-silico support at all.
+  printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" missense_variant 5 0.10 5000 100000 Pathogenic "$STAR1")"
+  # KEEP: ClinVar P/LP (1 star) on a consequence that is NOT whitelisted (intronic)
+  printf 'chr2\t7000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" intron_variant 5 0.10 0 0 Likely_pathogenic "$STAR1")"
+  # KEEP via LoF: 2 bp deletion, used to check the END coordinate spans the REF allele
+  printf 'chr2\t8000\t.\tCAA\tC\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" frameshift_variant 5 0.10 0 0)"
+  # KEEP: homozygous + heterozygous variant in the SAME dual-inheritance gene. The gene
+  # is flagged HOM; the het row must not inherit that label.
+  printf 'chr2\t9000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:0,40:40:99\n' "$(csq "$DUAL_GENE" missense_variant 30 0.99 0 0)"
+  printf 'chr2\t9500\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$DUAL_GENE" missense_variant 30 0.99 0 0)"
+  # KEEP: homozygous variant in a purely DOMINANT gene. Recessive reasoning does not
+  # apply to such genes, so it must carry no recessive_flag despite being hom.
+  printf 'chr2\t10000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:0,40:40:99\n' "$(csq "$PANEL_GENE" missense_variant 30 0.99 0 0)"
 } | bgzip -c > "$TD/TESTFAM-P.germline.vep.vcf.gz"
 
 # Pass 1 emits <proband>.<panel>.pangolin_input.csv and stops. Supply an empty score map
@@ -107,8 +133,37 @@ else
                                  || ok "non-panel gene dropped"
     grep -q "	$AR_GENE	" "$OUT" && bad "solitary AR-gene het (carrier) leaked into output" \
                                   || ok "solitary AR-gene het dropped (carrier rule)"
-    [ "$nrow" -eq 1 ] && ok "exactly 1 candidate row (common + synonymous also dropped)" \
-                      || bad "expected 1 row, got $nrow (genes: $(awk -F'\t' 'NR>1{print $6}' "$OUT" | tr '\n' ' '))"
+    row() { awk -F'\t' -v p="$1" 'NR>1 && $2==p' "$OUT"; }          # a data row by POS
+    col() { awk -F'\t' -v p="$1" -v c="$2" 'NR>1 && $2==p{print $c}' "$OUT"; }
+
+    # An established ClinVar classification outranks the rarity ceiling and the
+    # consequence whitelist — both gates otherwise fire before any evidence is read.
+    [ -n "$(row 6000)" ] && ok "ClinVar P/LP kept at 5% gnomAD AF (founder allele preserved)" \
+                         || bad "ClinVar P/LP variant dropped by the rarity gate"
+    [ -n "$(row 7000)" ] && ok "ClinVar P/LP kept on a non-whitelisted consequence (intronic)" \
+                         || bad "ClinVar P/LP variant dropped by the consequence whitelist"
+
+    e=$(col 8000 3)
+    [ "$e" = "8002" ] && ok "indel END spans the REF allele (8000 CAA/C -> 8002)" \
+                      || bad "indel END wrong: got '${e:-none}', expected 8002"
+
+    if [ -n "$(row 9500)" ] && [ -n "$(row 9000)" ]; then
+        rf=$(col 9500 36); zh=$(col 9000 36)
+        [ "$rf" != "HOM" ] && ok "het row not labelled HOM by a hom variant elsewhere in the gene" \
+                           || bad "het row carries recessive_flag=HOM while zygosity=$(col 9500 27)"
+        [ "$zh" = "HOM" ]  && ok "hom row still labelled HOM" \
+                           || bad "hom row lost its HOM label (got '${zh:-empty}')"
+    else
+        bad "dual-inheritance gene rows missing from output"
+    fi
+
+    dh=$(col 10000 36)
+    [ -n "$(row 10000)" ] && [ -z "$dh" ] \
+        && ok "hom row in a purely dominant gene carries no recessive_flag" \
+        || bad "dominant-gene hom row got recessive_flag='${dh:-?}' (expected empty)"
+
+    [ "$nrow" -eq 7 ] && ok "exactly 7 candidate rows (common, synonymous, off-panel, carrier dropped)" \
+                      || bad "expected 7 rows, got $nrow (POS: $(awk -F'\t' 'NR>1{print $2}' "$OUT" | tr '\n' ' '))"
 fi
 
 # ─────────────── 5: consult mode + BP7 splice evidence ───────────────
