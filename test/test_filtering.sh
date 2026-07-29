@@ -40,7 +40,7 @@ n=$(awk -F'\t' '!/^#/ && NF==4' g4e-2026.txt | wc -l)
 [ "$n" -gt 500 ] && ok "panel: $n rows have the 4 expected columns" || bad "panel column shape ($n 4-col rows)"
 n=$(grep -c . typevar.txt);                     [ "$n" -ge 8 ]    && ok "consequence whitelist: $n"  || bad "typevar too small ($n)"
 n=$(grep -c '^ENST' mane-plus-clinical-names.txt); [ "$n" -gt 15000 ] && ok "MANE transcripts: $n"   || bad "MANE list too small ($n)"
-n=$(grep -c . acmg_sf_v3.2.txt);                [ "$n" -ge 80 ]   && ok "ACMG SF genes: $n"          || bad "ACMG SF list wrong size ($n)"
+n=$(grep -vcE '^#|^$' acmg_sf_v3.2.txt);        [ "$n" -eq 81 ]   && ok "ACMG SF genes: $n"          || bad "ACMG SF list wrong size ($n, expected 81)"
 n=$(grep -c . gnomad-mis-constraint.txt);       [ "$n" -gt 15000 ] && ok "missense constraint: $n"   || bad "constraint table too small ($n)"
 
 # ─────────────── 4: end-to-end gating on synthetic data ───────────────
