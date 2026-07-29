@@ -24,8 +24,8 @@ _CF_SITE="$(dirname "$(readlink -f "$0")")/site.sh"   # resolve before cd
 cd "${WORKDIR:-$(dirname "$(readlink -f "$0")")}"
 
 # Optional: force specific sample(s) as proband, overriding filename-based
-# auto-discovery.  e.g.  PROBAND="EPIC280M" bash run_filtering.sh
-#                        PROBAND="EPIC280 EPIC280M" bash run_filtering.sh genes.txt
+# auto-discovery.  e.g.  PROBAND="EPIC280-M" bash run_filtering.sh
+#                        PROBAND="EPIC280-P EPIC280-M" bash run_filtering.sh genes.txt
 PROBAND_ARGS=()
 for _p in ${PROBAND:-}; do PROBAND_ARGS+=(--proband "$_p"); done
 GENES_ARGS=()

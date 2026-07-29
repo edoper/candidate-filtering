@@ -12,7 +12,7 @@
 #  Usage:  vep_annotate.sh <input.vcf[.gz]> <output.vcf.gz>
 #
 #  Env:
-#    VEP_FORKS   worker processes (default 12). VEP is CPU-bound, not memory-bound:
+#    VEP_FORKS   worker processes (default 4, set by site.sh). VEP is CPU-bound, not memory-bound:
 #                12 forks measured at only ~4.4 GB RSS. So on a 20-core box you can
 #                run TWO annotations concurrently at VEP_FORKS=8 (16 cores total) and
 #                halve the wall-clock of a cohort, whose tail is otherwise one genome
@@ -134,7 +134,7 @@ VEP_INPUT="$NORM_INPUT"
   --dir_plugins      "$VEP_PLUGINS" \
   --assembly         GRCh38 \
   --species          homo_sapiens \
-  --fork             "${VEP_FORKS:-12}" \
+  --fork             "${VEP_FORKS:-4}" \
   --buffer_size      5000 \
   --mane_select \
   --hgvs \

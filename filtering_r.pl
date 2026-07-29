@@ -16,8 +16,11 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * CSQ fields resolved BY NAME from each VCF's own CSQ header (no hard-coded
 #    indices). Critical fields are asserted at startup (loud failure, never
 #    silent).                                                          [#3]
-#  * Reads *.germline.vep.vcf.gz directly; auto-discovers families by filename:
-#    <base>=proband, <base>M=mother, <base>F=father.
+#  * Reads *.germline.vep.vcf.gz directly; auto-discovers families by filename
+#    using the role-suffix convention (see sample_role): <FAMILY>-P=proband,
+#    <FAMILY>-M=mother, <FAMILY>-F=father. A name with no -P/-M/-F suffix is
+#    ignored by discovery; if NO input has one, every sample is analyzed as a
+#    singleton proband.
 #  * Multiallelic input is assumed pre-split (vep_annotate.sh runs
 #    `bcftools norm -m-any`). Any residual multiallelic row is skipped+counted.
 #                                                                      [#2]
@@ -27,9 +30,10 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
 #    gnomAD AF than dominant genes.                                    [#6]
 #  * Inclusion (rescue) gate (OR): CADD>=25.3, AlphaMissense>=0.792, EVE path,
-#    REVEL>=0.644, Pangolin>=0.5, ClinVar P/LP, LoF (LOFTEE HC or high-impact
-#    truncating consequence). Each surviving row records which arm(s) fired in
-#    a `kept_by` column.                                          [#4,#8]
+#    REVEL>=0.644, Pangolin>=0.5, ClinVar P/LP, PS1/PM5 (ClinVar AA match), LoF
+#    (LOFTEE HC or high-impact truncating consequence), AR_hom (see below). Each
+#    surviving row records which arm(s) fired in a `kept_by` column, using the
+#    tokens CADD/AM/EVE/REVEL/Pangolin/ClinVar/PS1/PM5/LoF/AR_hom.   [#4,#8]
 #  * Genotype-aware: proband zygosity / DP / GQ / allele-balance columns from
 #    FORMAT; parent inheritance uses parental GT (carrier = non-ref), not mere
 #    site presence.                                                [#5,#10]
@@ -141,7 +145,7 @@ my $COHORT_MIN      = 10;    # min cohort size to activate the filter (below -> 
 my $COHORT_MAX_FRAC = 0.25;  # carried by >= this fraction of the cohort -> "recurrent"
 my $COHORT_ART_FREQ = 0.01;  # gnomAD AF (%) below this -> "absent from gnomAD" (1 in 10,000)
 
-# Ensembl REST endpoint for HGVS->coordinate recoding in -v/-l variant mode
+# Ensembl REST endpoint for HGVS->coordinate recoding in -v variant mode
 # (override with $ENSEMBL_REST; point at a private mirror on an air-gapped host).
 my $ENSEMBL_REST = $ENV{ENSEMBL_REST} // 'https://rest.ensembl.org';
 
@@ -707,7 +711,7 @@ sub acmg_classify {
 #############################################################################
 # Single-variant entry point: resolve -> sites-only VCF -> vep_annotate.sh
 #
-# Lets filtering_r.pl take a variant directly (-v / -l) instead of a pre-made
+# Lets filtering_r.pl take a variant directly (-v) instead of a pre-made
 # annotated VCF. Coordinates are normalized offline; HGVS is recoded to genomic
 # coordinates via the Ensembl REST API (only the variant string is transmitted,
 # never patient data). The resulting *.germline.vep.vcf.gz is then analyzed in
@@ -1060,7 +1064,7 @@ if (@force_probands) {
     }
 }
 
-# ── Variant entry point (-v / -l): build + annotate, then enter lookup mode ──
+# ── Variant entry point (-v): build + annotate, then enter lookup mode ──
 # Resolve the requested variant(s) to a sites-only chr-prefixed VCF, annotate it
 # through vep_annotate.sh, and feed the result into lookup mode below. The
 # annotated VCF + scratch dir are cleaned up after the run (unless --keep-vcf).
