@@ -111,5 +111,38 @@ else
                       || bad "expected 1 row, got $nrow (genes: $(awk -F'\t' 'NR>1{print $6}' "$OUT" | tr '\n' ' '))"
 fi
 
+# ─────────────── 5: consult mode + BP7 splice evidence ───────────────
+echo "== 5. consult mode (--lookup) and BP7 =="
+if [ -n "${OUT:-}" ]; then
+    TSV="${IN%.pangolin_input.csv}.pangolin.tsv"
+    before=$(md5sum "$OUT" | cut -d' ' -f1)
+    ( cd "$TD" && CLINVAR_AA_DIR= REF_FASTA= \
+        perl filtering_r.pl --lookup TESTFAM-P.germline.vep.vcf.gz >lookup.log 2>&1 )
+    LK=$(ls "$TD"/Lookup.TESTFAM-P.*.candidatos 2>/dev/null | head -1)
+    [ -n "$LK" ] && ok "--lookup wrote $(basename "$LK")" \
+                 || { bad "--lookup produced no Lookup.* output"; tail -8 "$TD/lookup.log" | sed 's/^/      /'; }
+    # The consult must never clobber the cohort table: --lookup derives its tag
+    # from the input VCF basename, which IS the proband name.
+    [ "$(md5sum "$OUT" | cut -d' ' -f1)" = "$before" ] \
+        && ok "cohort candidatos table left untouched by --lookup" \
+        || bad "--lookup overwrote $(basename "$OUT")"
+
+    # BP7 asserts ABSENCE of splice impact. With no score map it must stay silent;
+    # with a real sub-threshold score it must fire. Both directions are checked so
+    # the guard cannot be satisfied by simply disabling the criterion.
+    if [ -n "$LK" ]; then
+        grep -q 'BP7' "$LK" && bad "BP7 asserted with no Pangolin score" \
+                            || ok "BP7 withheld when splicing was never scored"
+    fi
+    printf 'chr2-3000-G-A\t0.05\n' > "$TSV"
+    ( cd "$TD" && CLINVAR_AA_DIR= REF_FASTA= \
+        perl filtering_r.pl --lookup TESTFAM-P.germline.vep.vcf.gz >lookup2.log 2>&1 )
+    LK2=$(ls "$TD"/Lookup.TESTFAM-P.*.candidatos 2>/dev/null | head -1)
+    grep -q 'BP7' "$LK2" && ok "BP7 fires on a scored synonymous variant (0.05 < 0.2)" \
+                         || bad "BP7 did not fire despite a sub-threshold Pangolin score"
+else
+    bad "skipping consult tests — section 4 produced no candidatos"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails TEST(S) FAILED"; exit 1; fi

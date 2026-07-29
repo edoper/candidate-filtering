@@ -243,7 +243,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **BS2** | ≥ 10 homozygotes in gnomAD | gnomAD v4.1 |
   | **BP4** | Computational benign, graded (see below) | AlphaMissense / REVEL |
   | **BP6** | This variant is reported benign in ClinVar (≥1★) | ClinVar |
-  | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2). ⚠️ A **missing** Pangolin score is treated as 0, so in a run without Pangolin every synonymous variant earns BP7 — see [Notes & limitations](#notes--limitations) | Pangolin |
+  | **BP7** | Synonymous **and scored** by Pangolin at < 0.2. The score must exist: an unscored variant is unknown, not benign, so BP7 is withheld rather than assumed | Pangolin |
 
   **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control), PM1
   (hotspot/domain), PM3 (in trans), PP1/BS4 (segregation), PP4 (phenotype specificity),
@@ -528,17 +528,16 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' --keep-vcf          # keep the annota
 
 Output: the **transposed, human-readable view only** — one `field <TAB> value` line per column
 (the transposed view, not the TSV cohort table) — written to `Lookup.<tag>.<panel>.candidatos` and echoed to stdout.
-`<tag>` is the variant id (`chr-pos-ref-alt`) for a single `-v`; for several, it is
-`<first-id>_<N>` where **`N` is the number of *additional* variants** (`-v` count − 1) — the tag is
-sanitized to `[A-Za-z0-9._-]`, so e.g. two variants starting at `chr9-6644629-T-C` give
+For `-v`, `<tag>` is the variant id (`chr-pos-ref-alt`) for a single variant; for several, it is
+`<first-id>_<N>` where **`N` is the number of *additional* variants** (`-v` count − 1). The tag is
+sanitized to `[A-Za-z0-9._-]`, so two variants starting at `chr9-6644629-T-C` give
 `Lookup.chr9-6644629-T-C_1.g4e.candidatos`.
 
-> ⚠️ **The `Lookup.` prefix only applies to `-v`.** A pre-annotated VCF can also be analyzed directly
-> with `--lookup <file.germline.vep.vcf.gz>`, but that path names its output after the **VCF's
-> basename**, not with a `Lookup.` prefix — so `--lookup EPIC280-P.germline.vep.vcf.gz` writes
-> `EPIC280-P.g4e.candidatos`, **the same filename a normal cohort run produces, overwriting it** with
-> the transposed lookup view. Run `--lookup` in a scratch directory, or copy the result out
-> immediately.
+A pre-annotated VCF can also be analyzed directly with `--lookup <file.germline.vep.vcf.gz>`, in
+which case `<tag>` is the VCF's basename: `--lookup EPIC280-P.germline.vep.vcf.gz` writes
+`Lookup.EPIC280-P.g4e.candidatos`. **Consult output always carries the `Lookup.` prefix**, so it
+occupies a separate namespace from the `<proband>.<panel>.candidatos` tables a cohort run produces
+and can never overwrite one.
 
 - The variant(s) are built **sites-only** (no sample), so genotype columns (zygosity/GT/DP/GQ/AB)
   are blank and `inheritance = NA`; every annotation-derived field is still computed.
@@ -554,10 +553,9 @@ sanitized to `[A-Za-z0-9._-]`, so e.g. two variants starting at `chr9-6644629-T-
 - **Splicing is scored too.** Because a single-variant consult should report *everything*,
   **`-v`** runs **Pangolin** on the variant inline (from the normalized annotated VCF) and
   fills `pangolin_score` + the splice rescue arm — no separate two-pass step needed. **`--lookup` on a
-  pre-annotated VCF does *not*** run Pangolin: it only picks up an existing
-  `<base>.<panel>.pangolin.tsv` **in the current working directory** (the VCF's own directory is
-  stripped, so a score map sitting next to a VCF given by absolute path is *not* found), and
-  otherwise leaves `pangolin_score` blank. It **degrades
+  pre-annotated VCF does not** — it reads an existing
+  `<base>.<panel>.pangolin.tsv` from the **current working directory** if one is there, and otherwise
+  leaves `pangolin_score` blank. It **degrades
   gracefully**: if the `pangolin` conda env or references are missing, or Pangolin fails, it warns
   and leaves `pangolin_score` blank rather than aborting. Pass **`--no-splice`** to skip it (faster,
   and avoids the conda/GPU dependency on air-gapped hosts).
@@ -606,11 +604,10 @@ creating an untracked **`site.env`** beside it (see [Setup 0.2](#02--tell-the-re
 | `PERL5LIB_EXTRA` | `$VEP_PLUGINS/loftee:$HOME/perl5/lib/perl5` | annotation — extra Perl libs VEP/LOFTEE need |
 | `HTSLIB_SO` | `$HOME/htslib/libhts.so` | annotation — `LD_PRELOAD`ed so LOFTEE's `Bio::DB::HTS` links (skipped silently if the file is absent) |
 
-Those are the variables `site.sh` defines, and the ones its export-wins-over-`site.env` precedence
-loop protects. The rest below are read directly by the individual scripts. The four `*_VCF` /
-`CADD_*` paths **can still be set in `site.env`** (it is sourced into the same shell), they simply
-aren't covered by that precedence loop; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles
-are environment-only and belong on the command line:
+Those are the variables `site.sh` defines and to which the precedence rule above applies. The
+remaining ones are read directly by the individual scripts. The four resource paths (`GNOMAD_VCF`,
+`CLINVAR_VCF`, `CADD_SNV`, `CADD_INDEL`) can also be set in `site.env`, since it is sourced into the
+same shell; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles belong on the command line:
 
 | Variable | Default | Used by |
 |----------|---------|---------|
@@ -647,11 +644,11 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
   founder / bottleneck alleles — which carry a gnomAD footprint — are preserved. For a strongly
   founder-enriched cohort where a *private* founder allele could plausibly reach 25% while being
   gnomAD-absent, review the per-run drop log or run with `--keep-cohort-artifacts`.
-- **BP7 without Pangolin:** a missing `pangolin_score` is treated as 0, so a synonymous variant earns
-  BP7 (benign supporting) even when splicing was never scored. Running `filtering_r.pl` on its own —
-  a supported mode (see [Setup 0.7](#07--pangolin-splice-scoring-optional-but-recommended)) — therefore
-  applies BP7 to *every* synonymous variant on no evidence. Use `run_filtering.sh` when the ACMG class
-  of synonymous variants matters, or disregard BP7 in Pangolin-less runs.
+- **Without Pangolin, splice evidence is simply absent, never assumed.** Running `filtering_r.pl`
+  directly (see [Setup 0.7](#07--pangolin-splice-scoring-optional-but-recommended)) leaves
+  `pangolin_score` blank; the splice rescue arm and BP7 both stay silent rather than defaulting either
+  way. Synonymous variants therefore remain unclassified on splicing instead of being labelled benign
+  on no evidence — use `run_filtering.sh` when that distinction matters.
 - This is a **triage tool to feed manual curation**, not an automated classifier.
 
 ## Data privacy

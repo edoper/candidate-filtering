@@ -668,8 +668,13 @@ sub acmg_classify {
     push @B, "BS1" if $v{freq} >= $BS1_FREQ && $v{freq} < $BA1_FREQ;
     push @B, "BS2" if $v{nhom} ne "" && $v{nhom} >= $BS2_NHOM;
     push @B, "BP6" if clinvar_benign($v{clnsig}) && ($v{clnstar} // 0) >= 1;
+    # BP7 requires POSITIVE evidence of no splice impact, so it fires only when a
+    # Pangolin score actually exists. An unscored variant is unknown, not benign:
+    # treating a missing score as 0 would assert benign-supporting evidence on
+    # every synonymous variant in a run without Pangolin, biasing the class away
+    # from the splice-active synonymous variants this pipeline exists to surface.
     push @B, "BP7" if $v{consequence} =~ /synonymous_variant/
-                   && (($v{pangolin} eq "" ? 0 : $v{pangolin}) < 0.2);
+                   && $v{pangolin} ne "" && $v{pangolin} < 0.2;
 
     # ── Combine per ACMG 2015. Count by strength tier; graded PP3/BP4 contribute
     #    at their tier (PP3_Strong->PS, _Moderate->PM, _Supporting->PP;
@@ -1598,7 +1603,7 @@ foreach my $proband (@probands) {
     }
     # [#7] Homozygous / compound-het flags are a RECESSIVE concept — compute them
     # only for recessive-capable genes (AR/XLR, incl. dual AD/AR). A purely dominant
-    # gene carrying two independent hets no longer gets a spurious CompHet? label.
+    # gene carrying two independent hets never gets a spurious CompHet? label.
     my %gene_flag;
     for my $g (keys %gene_var) {
         next unless $gene_rec{$g};
@@ -1647,12 +1652,18 @@ foreach my $proband (@probands) {
 
     # ── Write output ──
     # A single-variant consult (-v / --lookup) writes ONLY the transposed,
-    # human-readable view to Lookup.<coords>.<panel>.candidatos — one
+    # human-readable view to Lookup.<tag>.<panel>.candidatos — one
     # "field <TAB> value" line per column, "." for empty — and echoes it to
     # stdout; that IS the deliverable. Normal cohort runs write the TSV
     # candidatos table + run summary as before.
+    # The "Lookup." prefix is mandatory: -v already builds its VCF under that
+    # name, but --lookup derives the tag from the input VCF's basename, which for
+    # a cohort VCF is exactly the proband name. Without the prefix the transposed
+    # consult would overwrite that proband's real <proband>.<panel>.candidatos.
     if ($LOOKUP) {
-        my $rf = "$proband.$PANEL_TAG.candidatos";
+        my $rf = ($proband =~ /^Lookup\./)
+               ? "$proband.$PANEL_TAG.candidatos"
+               : "Lookup.$proband.$PANEL_TAG.candidatos";
         open OUT, ">", $rf or die "out: $!";
         my $nr = 0;
         for my $row (@rows) {

@@ -52,7 +52,7 @@ bash run_filtering.sh my_genes.txt    # custom genes-of-interest list (forwarded
 # Filtering only (no Pangolin)
 perl filtering_r.pl                   # default panel
 perl filtering_r.pl -l my_genes.txt   # custom panel (-l/--list is the ONLY way; no positional arg)
-                                      # NOTE: -l is the PANEL flag, never a lookup entry point
+                                      # -l sets the PANEL; consults are -v / --lookup
 perl filtering_r.pl --selftest        # built-in family-discovery self-test
 
 # Force a specific sample as proband (overrides filename auto-discovery)
@@ -73,7 +73,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   not ending in `-P/-M/-F` is ignored by discovery (still usable via `--proband`).
   **Singleton fallback:** if NO input has a `-P/-M/-F` suffix (e.g. `EPIGEN01..20`), discovery finds
   0 probands → it auto-analyzes **every** sample as a singleton proband (prints a `NOTE:`). So plainly-named
-  singleton cohorts work without `--proband`. (Historically this silently produced 0 candidatos.)
+  singleton cohorts work without `--proband`.
 - **Two-pass design:** if the Pangolin score map is absent, pass 1 emits the candidate list and
   stops; once scores exist, pass 2 writes the final table. `run_filtering.sh` does both.
 - **Annotations resolved by name** from the CSQ header — no hard-coded column indices.
@@ -104,7 +104,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   while a genuine HOM/comp-het still gets the recessive flag. Prevents dropping a dominant-acting variant
   (LoF etc.) just because the gene also has a recessive mechanism. Only **pure** AR/XLR genes use the
   carrier path. The HOM/comp-het flag pass runs for **recessive-capable genes only**, so a purely dominant
-  gene with two independent hets is no longer mislabeled `CompHet?`.
+  gene with two independent hets is never labelled `CompHet?`.
 - **Recessive carrier drop (DEFAULT):** a solitary het in a **pure** AR/XLR gene that is not biallelic is
   **dropped** — a single het can't explain recessive disease; carrier states are clinical noise. **True
   comp-hets are unaffected:** a gene with ≥2 gate-passing hets is a biallelic `CompHet` and kept. Same drop
@@ -121,8 +121,8 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   polypyrimidine/intron variants. `BS1/BS2/BA1` still flag benign-leaning ones.
 - **ACMG output is triage-grade**, not a final clinical call (PM1 not assessed; PP2 is gene-level
   constraint only, no domain/hotspot reasoning; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely
-  on ClinVar AA matching). **BP7 treats a missing `pangolin_score` as 0**, so a Pangolin-less run
-  (`filtering_r.pl` alone) tags every synonymous variant BP7 on no evidence. PM5 also fires for a
+  on ClinVar AA matching). **BP7 requires a real Pangolin score** — an unscored synonymous variant is
+  left unclassified on splicing rather than called benign. PM5 also fires for a
   single-codon in-frame deletion when a P/LP missense exists at the deleted residue (curatorial
   extension of PM5 beyond missense; tagged `(in-frame del)` in the `clinvar_aa` column).
 - **De-novo can't be confirmed here** — parent VCFs are variant-only (no reference depth), so `DN`
@@ -130,14 +130,17 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
 - **Secondary findings (ACMG SF v3.2)** are always scanned independent of the panel, flagged
   `GDV=Incidental`, and carry distinct consent/reporting obligations.
 - **`-l/--list <genes>` overrides the default g4e-2026 panel** — the only way to set the panel
-  (no positional argument; a stray positional is now a hard error). Works in normal runs and in
+  (no positional argument; a stray positional is a hard error). Works in normal runs and in
   `-v` consults alike; sets the Association/MOI/GDV columns and the output `<panel>` tag.
 - **Lookup mode** (`filtering_r.pl -v <variant>` (repeatable), or `--lookup <annotated.vcf.gz>`)
   bypasses all gates to report variants in full; all changes are `$LOOKUP`-guarded so normal runs
   are unaffected. `-v` builds a sites-only VCF, runs `vep_annotate.sh`, **and runs Pangolin inline**
   (so `pangolin_score` + the splice rescue arm work for a single variant too) — removing the
   annotated VCF afterward unless `--keep-vcf` (splice scratch is ALWAYS removed; `--lookup` on a
-  pre-annotated VCF does NOT run Pangolin at all). Pangolin degrades gracefully (warns,
+  pre-annotated VCF does NOT run Pangolin at all). Consult output ALWAYS carries the `Lookup.` prefix
+  (`Lookup.<tag>.<panel>.candidatos`, `<tag>` = variant id for `-v`, VCF basename for `--lookup`), so
+  it is namespaced apart from cohort `<proband>.<panel>.candidatos` tables and cannot overwrite one.
+  Pangolin degrades gracefully (warns,
   leaves score blank) if the env/refs are absent; **`--no-splice`** skips it. Coordinates are fully
   offline; **HGVS resolution calls the Ensembl REST API** (only the variant string, never patient
   data; needs `curl`+`jq`) and needs `ENST…` ids (the cache is Ensembl, not RefSeq).
