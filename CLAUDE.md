@@ -169,6 +169,24 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   Likely_pathogenic on a variant ClinVar calls Benign with review stars. This is a triage tool, so
   the class is left alone and the tension is made visible for the curator. `BP4` is deliberately
   excluded: a computational prediction disagreeing with PVS1/PM2 is routine, not a contradiction.
+- **Splice discovery (`$SPLICE_PROBE`).** `typevar.txt` has no bare `intron_variant` or
+  `synonymous_variant`, so those variants used to be dropped at Stage 1 and never scored — the
+  Pangolin arm could only *upgrade* an already-whitelisted splice-region variant, never *discover*
+  one. Intronic (within `$INTRON_MAX_DIST`=300 bp of an exon boundary, read from the HGVSc offset)
+  and synonymous variants in panel/ACMG-SF genes are now **probed**: sent to Pangolin, and kept
+  **only** if the splice arm fires (≥ `$SPLICE_MIN`). A probe that scores low simply disappears, so
+  the probe set widens what can be *found* without widening the table. Probes additionally require
+  **gnomAD coverage (`AN > 0`)** — see the caveat below. Disable with `--no-splice-discovery` or
+  `NO_SPLICE_DISCOVERY=1`. Cost: Pangolin runs ~8 variants/s on one GPU.
+- **⚠️ The gnomAD resource is MANE-restricted.** `gnomAD.joint.v4.1.mane.all.vcf.gz` covers MANE
+  transcripts and flanks, *not* deep intronic sequence. An uncovered position yields `AC=""`/`AN=""`,
+  which this code coerces to 0 — so `$freq` computes as 0, passes **every** rarity ceiling, and PM2
+  fires on what is really an annotation gap. That is why probes require `AN > 0`: it bounds the probe
+  set to where the resource can actually answer the question, and stops discovery from manufacturing
+  PM2. **True deep-intronic discovery (beyond the MANE footprint, e.g. CFTR c.3718-2477C>T) needs the
+  custom gnomAD VCF rebuilt with genome-wide coverage.**
+- **ACMG-SF genes reach Pangolin too**, so an incidental row can carry a real `pangolin_score` and
+  earn BP7 or the splice rescue. Previously only panel candidates were scored.
 - **ACMG output is triage-grade**, not a final clinical call (PM1 not assessed; PP2 is gene-level
   constraint only, no domain/hotspot reasoning; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely
   on ClinVar AA matching). **BP7 requires a real Pangolin score** — an unscored synonymous variant is
@@ -204,8 +222,8 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 |---|---|
 | **PVS1** | LoF: LOFTEE = HC, or truncating consequence with LOFTEE ≠ LC |
 | **PS1** | A **different** variant giving the same AA change is ClinVar P/LP (≥1★); the variant's own ClinVar record is excluded (the AA resource is indexed by source `chr-pos-ref-alt`), so a self-match cannot count one submission as both PS1 and PP5 |
-| **PS2** / **PM6** | De novo confirmed in trio (PS2) / assumed de novo, unconfirmed or duo (PM6) |
-| **PM2** | Absent or singleton in gnomAD (AC ≤ 1) |
+| **PS2** / **PM6** | De novo in a **full trio** (PS2 — relatedness assumed confirmed) / assumed de novo, poor proband genotype or duo-ambiguous (PM6). PS2 is structurally unreachable without both parents: `inheritance` is only ever `DN` when both are present, singletons get `NA` and duos get `DN/IM`–`DN/IF` |
+| **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Counted at **Supporting** (`PM2_Supporting`) per ClinGen SVI 2020, not ACMG 2015's Moderate — flip `$PM2_STRENGTH` to `'moderate'` to restore. ⚠️ ACMG 2015 has no "PVS1 + 1 supporting" rule, so a gnomAD-absent LoF variant now lands on **VUS** rather than Likely pathogenic |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) — **not counted when PVS1 fired**, so one protein-terminus effect cannot yield two ACMG lines via a compound consequence term |
 | **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
 | **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`; five HGNC renames resolved via `%GENE_ALIAS`, and per-panel coverage is printed at startup). Counts **independently of PP3** (separate ACMG lines), but **suppressed when BP4 fires** (no gene-level pathogenic support for a benign-predicted variant). Guard in `acmg_classify` is `!$bp4`; drop it to fire even alongside BP4. |

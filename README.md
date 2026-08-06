@@ -194,6 +194,52 @@ All thresholds are single constants at the top of `filtering_r.pl`.
     ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
     plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
+### Stage 2b — Splice discovery probes
+
+`typevar.txt` contains no bare `intron_variant` and no bare `synonymous_variant`. Those variants were
+therefore dropped at Stage 1, never reached Pangolin, and the splice rescue arm could only ever
+**upgrade** a variant that was already whitelisted as splice-region — never **discover** one. The
+classic pathogenic deep-intronic alleles (CFTR `c.3718-2477C>T`, USH2A `c.7595-2144A>G`) were
+structurally unreachable, and BP7's entire target population never reached the classifier.
+
+A **probe** is an intronic or synonymous variant in a panel or ACMG-SF gene that is sent to Pangolin
+purely so the model can look at it. A probe is **not a candidate**: it earns a row only if the splice
+arm fires (`pangolin_score` ≥ `$SPLICE_MIN`), and otherwise disappears. The probe set widens what can
+be *found* without widening the table.
+
+Three bounds keep it affordable and honest:
+
+| Bound | Value | Why |
+|---|---|---|
+| Intron distance | `$INTRON_MAX_DIST` = 300 bp | Read from the HGVSc offset (`c.1234+56` → 56; a range keeps its closest endpoint). Pangolin scores ~8 variants/s on one GPU and a WGS proband carries ~155k rare intronic variants in panel genes, so distance is the primary volume bound |
+| Rarity | `$PROBE_FREQ_MAX` = 0.01% | Applied to **every** gene. A pathogenic splice variant is rare regardless of mode of inheritance, so the permissive `$FREQ_AR` carrier ceiling (1%, meant for recessive coding candidates) is deliberately not used |
+| gnomAD coverage | `AN > 0` (`$PROBE_REQUIRE_GNOMAD`, default on) | See below — this one is load-bearing. `--probe-uncovered` turns it off |
+
+> ⚠️ **The custom gnomAD resource is MANE-restricted.** `gnomAD.joint.v4.1.mane.all.vcf.gz` covers
+> MANE transcripts and their flanks, *not* deep intronic sequence. An uncovered position yields
+> `AC=""`/`AN=""`, which the code coerces to 0 — so `$freq` computes as 0, passes **every** rarity
+> ceiling, and **PM2 fires on what is really an annotation gap**. Probing uncovered territory would
+> rescue variants with no working frequency filter *and* a manufactured pathogenic criterion.
+> Requiring `AN > 0` bounds the probe set to where the resource can actually answer the question.
+>
+> **Measured consequence.** On a real WGS proband the 300 bp window holds ~22,700 rare intronic
+> variants, of which only **~8** are gnomAD-covered. So with the default the probe set costs almost
+> nothing (8 probes/proband) — and discovery stays confined to roughly the MANE footprint, meaning a
+> classic deep-intronic allele such as CFTR `c.3718-2477C>T` is **still out of reach**.
+> `--probe-uncovered` (env `PROBE_UNCOVERED=1`) probes all ~22,700: ~48 min of GPU time per proband,
+> in territory where the rarity gate cannot work. PM2 is withheld on those rows so the run does not
+> invent a pathogenic criterion, but the frequency filter is genuinely blind there.
+>
+> **The real unlock is rebuilding the custom gnomAD VCF with genome-wide coverage.** That is a
+> pending resource task, not a code change; once done, this flag stops mattering.
+
+ACMG-SF genes are also sent to Pangolin now. Previously only panel candidates were scored, so every
+`GDV=Incidental` row carried a blank `pangolin_score` and could never earn BP7 or the splice rescue —
+a secondary finding was structurally denied evidence a primary candidate got.
+
+Disable the whole probe set with `--no-splice-discovery` (or `NO_SPLICE_DISCOVERY=1`); the EMIT
+summary reports how many probes were added and the final summary how many Pangolin rescued.
+
 ### Stage 3 — Cohort recurrent-artifact filter (internal panel-of-normals)
 
 When a **real cohort** is auto-analyzed together (≥ `$COHORT_MIN` = **5 samples**, ≥2 probands), the pipeline
@@ -291,8 +337,8 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   |---|---|---|
   | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
-  | **PS2** | De novo **confirmed** in a trio (`inheritance=DN`, clean genotype) | parental GT |
-  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) | gnomAD v4.1 |
+  | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype); relatedness is assumed confirmed. Structurally unreachable without both parents — `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT |
+  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), counted at **Supporting** (`PM2_Supporting`) per [ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/), not ACMG 2015's Moderate. See the caveat below | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when PVS1 fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect, pushing an LP call to Pathogenic | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
   | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM` **in a gene whose panel MOI contains AD or XL**. A duo-ambiguous call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — never earns PM6 | parental GT + panel MOI |
@@ -559,6 +605,8 @@ Every value-taking flag also accepts the `--flag=value` form.
 | `--no-splice` | — | Consult mode: skip the inline Pangolin run. |
 | `--keep-ar-carriers` | — | Surface strong solitary AR/XLR carriers (carrier-only tier) instead of dropping them. |
 | `--keep-cohort-artifacts` | — | Tag cohort recurrent artifacts `flags=cohort_artifact` instead of dropping them. |
+| `--no-splice-discovery` | `NO_SPLICE_DISCOVERY=1` | Skip the intronic/synonymous Pangolin probe set (Stage 2b). Faster; loses splice discovery. |
+| `--probe-uncovered` | `PROBE_UNCOVERED=1` | Probe intronic variants outside the gnomAD footprint. **~48 min GPU per proband**; the rarity gate cannot work there, and PM2 is withheld on those rows. |
 | `--selftest` | — | Family-discovery self-test; exits. Needs no data. |
 | `--selftest-cohort` | — | Cohort recurrent-artifact self-test; exits. Needs no data. |
 
@@ -732,12 +780,16 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
   way. Synonymous variants therefore remain unclassified on splicing instead of being labelled benign
   on no evidence — use `run_filtering.sh` when that distinction matters.
 - **Known-open triage limitations** (deliberate, not defects — they change *class*, not *coverage*):
-  - **PM2 counts at Moderate.** ClinGen SVI (2020) recommends Supporting for rare disease. At Moderate
-    it is load-bearing: on a 324-row sample of real output, re-scoring PM2 as Supporting moved
-    **60 of 64** Likely_pathogenic calls to VUS — the dominant pattern is `PM2,PP3_Strong` → LP, i.e.
-    gnomAD absence plus one AlphaMissense score. Compounding it, a **missing** gnomAD annotation is
-    coerced to `AC=0`, so PM2 cannot distinguish "gnomAD never saw this allele" from "the exact-match
-    join failed" (the left-alignment fix above removes the largest source of the latter, not all of it).
+  - **PM2 is now Supporting** (`$PM2_STRENGTH`), per ClinGen SVI 2020. ⚠️ **Read this before
+    interpreting classes:** the downgrade interacts badly with *categorical* combining. ACMG 2015
+    has no "PVS1 + 1 supporting" pathway, so a gnomAD-absent nonsense or frameshift variant in a
+    disease gene (`PVS1,PM2_Supporting`) now lands on **VUS**, not Likely pathogenic. Under the
+    ClinGen/Tavtigian **Bayesian points** framework — the framework PM2_Supporting was calibrated
+    in — the same variant scores 8+1 = 9 points and stays Likely pathogenic. The two are not
+    interchangeable, and this pipeline combines categorically. Set `$PM2_STRENGTH = 'moderate'` to
+    restore the 2015 reading. Moving to a points-based combiner is the real fix and is not done.
+    Separately, a **missing** gnomAD annotation is still coerced to `AC=0`, so PM2 cannot distinguish
+    "gnomAD never saw this allele" from "the position is outside the MANE-restricted resource".
   - **PS2 vs PM6.** A trio `DN` earns **PS2** (Strong) when the *proband's* genotype is clean, but the
     discriminator carries no information about parentage or parental coverage — which is what actually
     separates PS2 from PM6 — and the same rows are stamped `DN_unconfirmed`. Trios are assumed
@@ -751,6 +803,19 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
 
 Correctness fixes from a full audit. Everything here changes **which variants reach the curator** or
 **what class they carry**, so tables produced before this point are not comparable.
+
+### Second pass (same day)
+
+| Change | Effect |
+|---|---|
+| **PM2 → Supporting** (`$PM2_STRENGTH`) | ClinGen SVI 2020. ⚠️ Under categorical combining this drops gnomAD-absent LoF variants from Likely pathogenic to VUS — see the limitations section |
+| **Splice discovery probes** (Stage 2b) | Deep-intronic (≤300 bp) and synonymous variants are scored by Pangolin and rescued if they disrupt splicing. Previously unreachable — the splice arm could only upgrade, never discover |
+| **ACMG-SF genes reach Pangolin** | Incidental rows can finally carry a real `pangolin_score` and earn BP7 / the splice rescue |
+| Probes require gnomAD coverage (`AN > 0`) | The custom gnomAD VCF is MANE-restricted; probing uncovered introns would rescue variants with no frequency filter and a manufactured PM2. Measured: only ~8 of ~22,700 in-window intronic variants per proband are covered — so discovery is real but resource-limited. `--probe-uncovered` widens it |
+| PM2 withheld on gnomAD-uncovered probe rows | `AN=0` outside the resource means "not looked at", not "unobserved" |
+| `--no-splice-discovery` | Opt out of the probe set |
+
+### First pass
 
 | Change | Effect |
 |---|---|

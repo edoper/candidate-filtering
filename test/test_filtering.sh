@@ -336,5 +336,180 @@ else
                      *) bad "no clinvar_conflict flag on $cls with criteria=$ccr (flags='${cfl:-empty}')";; esac
 fi
 
+# ─────────── 8: splice discovery, ACMG-SF scoring, PM2 strength, PS2 scope ───────────
+echo "== 8. splice discovery, SF scoring, PM2 strength, PS2 scope =="
+SD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD"' EXIT
+for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+    ln -sf "$REPO/$f" "$SD/$f"
+done
+SF_GENE=$(awk -F'\t' '!/^#/ && NF{print $1}' "$REPO/acmg_sf_v3.2.txt" | grep -vx TTN | head -1)
+# csq with an explicit HGVSc, so an intron offset (c.100+50) can be expressed.
+csq3() { # <gene> <consequence> <cadd> <am> <ac> <an> <hgvsc>
+  printf '%s|1|%s|%s|%s|%s|p.Gly34Ser|100|G/S|34||||%s|likely_pathogenic|%s||||%s|%s|0|0|PASS|||' \
+         "$1" "$MANE_TX" "$MANE_TX" "$2" "$7" "$3" "$4" "$5" "$6"
+}
+{
+  echo '##fileformat=VCFv4.2'
+  echo '##contig=<ID=chr2,length=250000000>'
+  echo '##FILTER=<ID=PASS,Description="p">'
+  echo '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">'
+  echo '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">'
+  echo '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="DP">'
+  echo '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">'
+  echo "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: $CSQ\">"
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSPFAM-P\n'
+  # PROBE, in window (c.100+50): deep-intronic, gnomAD-covered and rare. Not whitelisted,
+  # so ONLY a positive Pangolin score can rescue it. Scored high below -> must appear.
+  printf 'chr2\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" intron_variant 5 0.10 1 200000 'c.100+50G>A')"
+  # PROBE, in window, but Pangolin says no -> must NOT appear.
+  printf 'chr2\t1100\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" intron_variant 5 0.10 1 200000 'c.200+60G>A')"
+  # PROBE out of window (c.100+9000): beyond $INTRON_MAX_DIST -> never even scored.
+  printf 'chr2\t1200\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" intron_variant 5 0.10 1 200000 'c.100+9000G>A')"
+  # PROBE with NO gnomAD coverage (AN=0): frequency unknowable and PM2 would be
+  # manufactured, so it must not be probed at all.
+  printf 'chr2\t1300\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" intron_variant 5 0.10 0 0 'c.300+40G>A')"
+  # Synonymous probe, gnomAD-covered: exonic splice-altering synonymous. Scored high.
+  printf 'chr2\t1400\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" synonymous_variant 5 0.10 1 200000 'c.400G>A')"
+  # ACMG-SF gene, whitelisted consequence -> must reach the Pangolin input (#6).
+  printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$SF_GENE" missense_variant 30 0.99 1 200000 'c.500G>A')"
+  # Truncating + gnomAD-absent, with NO computational support (empty AlphaMissense/REVEL)
+  # so the class rests on PVS1 + PM2 alone — that is what makes it a PM2-strength probe.
+  printf 'chr2\t3000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" stop_gained 5 '' 0 0 'c.600G>A')"
+} | bgzip -c > "$SD/SPFAM-P.germline.vep.vcf.gz"
+
+( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >spass1.log 2>&1 )
+SIN=$(ls "$SD"/SPFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
+if [ -z "$SIN" ]; then
+    bad "section 8: pass 1 emitted no pangolin input"; tail -10 "$SD/spass1.log" | sed 's/^/      /'
+else
+    inwin=$(awk -F, 'NR>1 && $2==1000' "$SIN" | wc -l)
+    [ "$inwin" -eq 1 ] && ok "intronic probe inside the window entered the Pangolin set" \
+                       || bad "in-window intronic probe not scored"
+    out=$(awk -F, 'NR>1 && $2==1200' "$SIN" | wc -l)
+    [ "$out" -eq 0 ] && ok "intronic variant beyond \$INTRON_MAX_DIST not probed" \
+                     || bad "out-of-window intronic variant was probed"
+    nocov=$(awk -F, 'NR>1 && $2==1300' "$SIN" | wc -l)
+    [ "$nocov" -eq 0 ] && ok "gnomAD-uncovered intronic variant not probed (would manufacture PM2)" \
+                       || bad "uncovered intronic variant was probed"
+    syn=$(awk -F, 'NR>1 && $2==1400' "$SIN" | wc -l)
+    [ "$syn" -eq 1 ] && ok "synonymous probe entered the Pangolin set" \
+                     || bad "synonymous probe not scored"
+    sfin=$(awk -F, 'NR>1 && $2==2000' "$SIN" | wc -l)
+    [ "$sfin" -eq 1 ] && ok "ACMG-SF gene variant reaches the Pangolin input (#6)" \
+                      || bad "ACMG-SF variant still absent from the Pangolin input"
+
+    # Score: rescue 1000 and 1400, reject 1100.
+    STSV="${SIN%.pangolin_input.csv}.pangolin.tsv"
+    { printf 'chr2-1000-G-A\t0.90\n'; printf 'chr2-1100-G-A\t0.05\n'; printf 'chr2-1400-G-A\t0.80\n'; } > "$STSV"
+    ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >spass2.log 2>&1 )
+    SOUT=$(ls "$SD"/SPFAM-P.*.candidatos 2>/dev/null | head -1)
+    if [ -z "$SOUT" ]; then
+        bad "section 8: no candidatos"; tail -10 "$SD/spass2.log" | sed 's/^/      /'
+    else
+        scol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$SOUT"; }
+        [ -n "$(awk -F'\t' 'NR>1 && $2==1000' "$SOUT")" ] \
+            && ok "DEEP-INTRONIC variant DISCOVERED via Pangolin (kept_by=$(scol kept_by 1000))" \
+            || bad "high-scoring deep-intronic probe was not rescued"
+        [ -z "$(awk -F'\t' 'NR>1 && $2==1100' "$SOUT")" ] \
+            && ok "low-scoring probe stays out of the table" \
+            || bad "probe with Pangolin 0.05 leaked into the table"
+        [ -n "$(awk -F'\t' 'NR>1 && $2==1400' "$SOUT")" ] \
+            && ok "splice-altering SYNONYMOUS variant discovered" \
+            || bad "high-scoring synonymous probe was not rescued"
+
+        # PM2 strength: PVS1 + PM2 alone. At Supporting (ClinGen SVI) 2015 has no
+        # "PVS1 + 1 supporting" rule, so this is VUS; at Moderate it would be LP.
+        pm2c=$(scol acmg_criteria 3000); pm2k=$(scol acmg_class 3000)
+        case ",$pm2c," in *,PM2_Supporting,*) ok "PM2 recorded as PM2_Supporting (ClinGen SVI)";;
+                          *,PM2,*) ok "PM2 recorded at Moderate (ACMG 2015 reading)";;
+                          *) bad "no PM2 on a gnomAD-absent variant (criteria=$pm2c)";; esac
+        case "$pm2c" in
+          *PM2_Supporting*) [ "$pm2k" = "VUS" ] \
+              && ok "PVS1+PM2_Supporting combines to VUS (no such rule in ACMG 2015 Table 5)" \
+              || bad "PVS1+PM2_Supporting gave '$pm2k', expected VUS" ;;
+          *) [ "$pm2k" = "Likely_pathogenic" ] \
+              && ok "PVS1+PM2(Moderate) combines to Likely_pathogenic" \
+              || bad "PVS1+PM2 gave '$pm2k', expected Likely_pathogenic" ;;
+        esac
+
+        # An uncovered probe must not earn PM2: AN=0 there means "outside the resource",
+        # not "unobserved". Re-run with --probe-uncovered so 1300 (AN=0) is probed, and
+        # score it high enough to be rescued.
+        printf 'chr2-1300-G-A\t0.95\n' >> "$STSV"
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl --probe-uncovered >spass3.log 2>&1 )
+        upm=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==1300{print $h["acmg_criteria"]}' "$SOUT")
+        if [ -n "$(awk -F'\t' 'NR>1 && $2==1300' "$SOUT")" ]; then
+            ok "--probe-uncovered widens the probe set past the gnomAD footprint"
+            case ",$upm," in *,PM2*) bad "PM2 awarded on an uncovered probe (criteria=$upm)";;
+                             *) ok "PM2 withheld on a gnomAD-uncovered probe row";; esac
+        else
+            bad "--probe-uncovered did not rescue the uncovered probe"
+        fi
+
+        # PS2 scope: this is a SINGLETON run, so inheritance is NA and PS2 must never fire.
+        grep -q 'PS2' "$SOUT" && bad "PS2 fired in a singleton run (no parents present)" \
+                              || ok "PS2 never fires without a trio (singleton run)"
+    fi
+fi
+
+echo "== 9. PM1 from the PERv1 custom track =="
+PD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD" "$PD"' EXIT
+for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+    ln -sf "$REPO/$f" "$PD/$f"
+done
+# CSQ layout with the PER field appended, exactly as vep_annotate.sh emits it.
+CSQP="$CSQ|PER"
+# <gene> <consequence> <PER name field>
+csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_pathogenic|0.99||||0|0|0|0|PASS|||%s' \
+                "$1" "$MANE_TX" "$MANE_TX" "$2" "$3"; }
+{
+  echo '##fileformat=VCFv4.2'
+  echo '##contig=<ID=chr2,length=250000000>'
+  echo '##FILTER=<ID=PASS,Description="p">'
+  echo '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">'
+  echo '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">'
+  echo '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="DP">'
+  echo '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">'
+  echo "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: $CSQP\">"
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tPMFAM-P\n'
+  # 1000: missense in a Strong PER of THIS gene -> PM1_Strong.
+  printf 'chr2\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "$PANEL_GENE/PERv1_direct/PM1_Strong/PER1/p.30-40/OR=42.9/adjP=0.01")"
+  # 2000: missense in a Moderate PER -> PM1 at Moderate.
+  printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "$PANEL_GENE/PERv1_direct/PM1_Moderate/PER2/p.50-60/OR=6.1/adjP=0.02")"
+  # 3000: SYNONYMOUS inside a PER. A PER is a missense-burden statement -> no PM1.
+  printf 'chr2\t3000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" synonymous_variant "$PANEL_GENE/PERv1_direct/PM1_Strong/PER3/p.70-80/OR=99/adjP=0.001")"
+  # 4000: missense overlapping a PER computed on a DIFFERENT gene (co-located MANE
+  # models are real). The region is evidence about that gene, not this one -> no PM1.
+  printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "OTHERGENE/PERv1_direct/PM1_Strong/PER1/p.90-99/OR=50/adjP=0.001")"
+  # 5000: missense with NO PER overlap -> no PM1.
+  printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "")"
+} | bgzip -c > "$PD/PMFAM-P.germline.vep.vcf.gz"
+( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl --no-splice >pm1.log 2>&1 )
+POUT=$(ls "$PD"/PMFAM-P.*.candidatos 2>/dev/null | head -1)
+if [ -z "$POUT" ]; then
+    bad "section 9: no candidatos"; tail -10 "$PD/pm1.log" | sed 's/^/      /'
+else
+    pcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$POUT"; }
+    case ",$(pcol acmg_criteria 1000)," in *,PM1_Strong,*) ok "PM1_Strong awarded in a high-enrichment PER";;
+        *) bad "PM1_Strong not awarded (criteria=$(pcol acmg_criteria 1000))";; esac
+    case "$(pcol flags 1000)" in *PM1:PER1/p.30-40*) ok "PM1 region recorded in flags for audit";;
+        *) bad "PM1 region detail missing from flags (flags=$(pcol flags 1000))";; esac
+    case ",$(pcol acmg_criteria 2000)," in *,PM1,*) ok "PM1 awarded at Moderate in a low-enrichment PER";;
+        *) bad "PM1 (Moderate) not awarded (criteria=$(pcol acmg_criteria 2000))";; esac
+    case ",$(pcol acmg_criteria 3000)," in *,PM1*) bad "PM1 fired on a SYNONYMOUS variant";;
+        *) ok "PM1 withheld on a synonymous variant inside a PER";; esac
+    case ",$(pcol acmg_criteria 4000)," in *,PM1*) bad "PM1 fired from a PER belonging to another gene";;
+        *) ok "PM1 withheld when the PER belongs to a different gene";; esac
+    case ",$(pcol acmg_criteria 5000)," in *,PM1*) bad "PM1 fired without any PER overlap";;
+        *) ok "PM1 withheld outside every PER";; esac
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails TEST(S) FAILED"; exit 1; fi

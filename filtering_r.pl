@@ -130,6 +130,44 @@ my $REVEL_MIN  = 0.644;  # REVEL rescue threshold (ClinGen PP3)
 my $AM_MIN     = 0.792;  # AlphaMissense pathogenicity rescue threshold
 my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 
+# ── Splice DISCOVERY probes [#5] ──
+# typevar.txt has no bare `intron_variant` and no bare `synonymous_variant`, so a
+# deep-intronic or exonic-synonymous splice-disrupting variant was dropped at Stage 1,
+# never reached Pangolin, and the splice rescue arm could only ever UPGRADE a variant that
+# was already whitelisted — never DISCOVER one. The classic pathogenic deep-intronic
+# alleles (CFTR c.3718-2477C>T, USH2A c.7595-2144A>G) were structurally unreachable.
+#
+# Probes are scored by Pangolin and kept ONLY if the splice arm fires (>= $SPLICE_MIN).
+# They are not candidates in their own right, so a probe that Pangolin scores low simply
+# disappears — the probe set widens what can be FOUND without widening the table.
+#
+# VOLUME IS THE BINDING CONSTRAINT. Pangolin scores ~8 variants/s on one GPU, and a WGS
+# proband carries ~155k rare intronic variants in panel genes. Two bounds keep it finite:
+#   (a) distance from the exon boundary, read from the HGVSc offset; and
+#   (b) a strict rarity ceiling applied to ALL genes — a pathogenic splice variant is rare
+#       regardless of the gene's mode of inheritance, so the permissive $FREQ_AR carrier
+#       ceiling (1%, meant for recessive coding candidates) is deliberately NOT used here.
+# Set $SPLICE_PROBE = 0, or pass --no-splice-discovery, to restore the prior behaviour.
+my $SPLICE_PROBE    = $ENV{NO_SPLICE_DISCOVERY} ? 0 : 1;
+my $INTRON_MAX_DIST = 300;    # max |HGVSc intron offset| to probe (bp from exon boundary)
+my $PROBE_FREQ_MAX  = 0.01;   # max gnomAD AF (%) for a probe, every gene
+
+# Require the probe position to EXIST in the gnomAD resource (AN > 0). Default ON.
+#
+# MEASURED COST OF THIS SETTING. The custom VCF is gnomAD.joint.v4.1.**mane**, so intronic
+# coverage is thin: on a real WGS proband the 300 bp window contains ~22,700 rare intronic
+# variants, but only ~8 of them are gnomAD-covered. Requiring coverage therefore keeps the
+# probe set almost free (8 probes/proband) — and keeps discovery confined to roughly the
+# MANE footprint, so a classic deep-intronic allele (CFTR c.3718-2477C>T) is still out of
+# reach. Turning it OFF (--probe-uncovered) probes all ~22,700: at ~8 variants/s that is
+# ~48 min per proband of GPU time, and every rescued variant sits in territory where the
+# rarity gate cannot work. PM2 is withheld on such rows (see acmg_classify) so the run at
+# least does not invent a pathogenic criterion for them.
+#
+# The real unlock is rebuilding the custom gnomAD VCF with genome-wide coverage; then this
+# flag stops mattering and the rarity gate works everywhere.
+my $PROBE_REQUIRE_GNOMAD = $ENV{PROBE_UNCOVERED} ? 0 : 1;
+
 # ── Cohort recurrent-artifact filter (internal panel-of-normals) [#11] ──
 # Systematic technical artifacts — reference/mapping errors in paralog-rich or
 # low-complexity genes (e.g. SYNE1, KMT2C) — recur across a large fraction of a
@@ -197,6 +235,22 @@ my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopo
 
 # ── Automated ACMG/AMP classification (InterVar-style, triage only) [#2] ──
 my $PM2_AC_MAX  = 1;       # gnomAD AC at/below -> PM2 (absent=0 or singleton=1)
+# PM2 evidence strength. ACMG 2015 lists PM2 as Moderate; ClinGen SVI (2020) recommends
+# downgrading it to SUPPORTING for rare disease, because absence from a population database
+# is weak evidence on its own and is the single most over-applied criterion.
+#
+# DELIBERATELY LEFT AT 'moderate'. The SVI downgrade is only coherent inside the framework
+# it was calibrated in — the ClinGen/Tavtigian Bayesian POINTS system, where PVS1=8 and
+# PM2_Supporting=1 sum to 9 points and still reach Likely pathogenic. This pipeline combines
+# CATEGORICALLY (ACMG 2015 Table 5), which has no "PVS1 + 1 supporting" pathway at all, so
+# the downgrade there silently demotes every gnomAD-absent nonsense/frameshift variant in a
+# disease gene to VUS. Measured on batch4: KCNT1, CUX2, RELN and HCN2 LoF calls all dropped
+# to VUS. That is an artefact of mixing two frameworks, not a more conservative reading.
+#
+# Setting this to 'supporting' is therefore only correct once the combining step is replaced
+# with a points-based one. Until then 'moderate' is the self-consistent choice.
+# See the README limitations section.
+my $PM2_STRENGTH = 'moderate';     # 'moderate' (ACMG 2015) | 'supporting' (ClinGen SVI 2020)
 my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare disease)
 my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
 my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
@@ -316,11 +370,15 @@ while (@ARGV) {
     elsif ($a eq '--all-transcripts')       { $ALL_TX = 1; }
     elsif ($a eq '--keep-vcf')              { $KEEP_VCF = 1; }
     elsif ($a eq '--no-splice')             { $NO_SPLICE = 1; }   # -v: skip Pangolin splice scoring
+    elsif ($a eq '--no-splice-discovery')   { $SPLICE_PROBE = 0; } # skip the intronic/synonymous probe set
+    elsif ($a eq '--probe-uncovered')       { $PROBE_REQUIRE_GNOMAD = 0; }  # probe outside the gnomAD footprint (SLOW)
     else {
         die "unknown argument: '$a'\n".
             "  set the candidate-gene panel with  -l/--list FILE  (no positional form);\n".
             "  a single variant with  -v/--variant '<v>' , a pre-annotated VCF with  --lookup FILE;\n".
-            "  keep recessive carriers with  --keep-ar-carriers , cohort artifacts with  --keep-cohort-artifacts.\n";
+            "  keep recessive carriers with  --keep-ar-carriers , cohort artifacts with  --keep-cohort-artifacts;\n".
+            "  skip the splice-discovery probe set with  --no-splice-discovery ,\n".
+            "  or widen it past the gnomAD footprint (SLOW) with  --probe-uncovered .\n";
     }
 }
 my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2026.txt";
@@ -562,6 +620,19 @@ sub cohort_artifact_call {
     return (($carriers / $n) >= $COHORT_MAX_FRAC && $gnomad_ac <= 0) ? 1 : 0;
 }
 
+# Distance into an intron from the nearest exon boundary, taken from the HGVSc offset
+# (c.1234+56A>G -> 56; c.1235-30A>G -> 30). A range keeps its closest endpoint
+# (c.100+5_100+12del -> 5). Returns undef when the annotation carries no offset, which is
+# the case for anything that is not intronic — so callers must also check the consequence.
+sub intron_offset {
+    my ($hgvsc) = @_;
+    return undef unless defined $hgvsc && $hgvsc =~ /c\./;
+    (my $c = $hgvsc) =~ s/^.*c\.//;
+    my $min;
+    while ($c =~ /[+-](\d+)/g) { $min = $1 if !defined $min || $1 < $min; }
+    return $min;
+}
+
 # Is a consequence whitelisted? Pass if ANY '&'-separated atom is in the list.
 sub consequence_ok {
     my ($csq) = @_;
@@ -758,7 +829,16 @@ sub acmg_classify {
     # matched per '&'-atom while this regex matches the whole string — two ACMG lines
     # from one protein-terminus effect, which pushes an LP call to Pathogenic.
     push @P, "PM4" if !$pvs1 && $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
-    push @P, "PM2" if $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;       # absent or singleton
+    # PM2 at the configured strength (see $PM2_STRENGTH). Written as PM2_Supporting when
+    # downgraded so the criteria string says which reading produced the class.
+    # "Absent from gnomAD" is only assertable where gnomAD actually looked. A splice
+    # probe rescued from outside the MANE-restricted resource has AN=0 because the position
+    # is not IN the resource, not because the allele is unobserved — awarding PM2 there
+    # would manufacture pathogenic evidence out of an annotation gap. Scoped to probe rows
+    # so ordinary candidates, which sit inside the covered footprint, are unaffected.
+    my $ac_assertable = !($v{probe} && ($v{an} // 0) <= 0);
+    push @P, ($PM2_STRENGTH eq 'moderate' ? "PM2" : "PM2_Supporting")
+        if $ac_assertable && $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;   # absent or singleton
     # PP5 requires >=1 review star, like every other ClinVar consumer in this file
     # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6). Without the gate a single
     # 0-star "no assertion criteria provided" submission — ~16% of the P/LP corpus —
@@ -793,6 +873,24 @@ sub acmg_classify {
     push @P, "PP3_".ucfirst($pp3) if $pp3;
     push @B, "BP4_".ucfirst($bp4) if $bp4;
 
+    # PM1: the variant falls in a PERv1 pathogenic-variant-enriched region computed
+    # ON THIS GENE (Perez-Palma et al., Genome Res 2020, whose stated application is
+    # PM1). Graded by the region's patient-vs-population fold enrichment at the
+    # published Tavtigian-2018 calibration: >= 18.7 counts at Strong, otherwise
+    # Moderate. Restricted to missense and in-frame indels, which is what the region
+    # was computed from -- a PER is a missense-burden statement, so it lends nothing
+    # to a splice, synonymous or LoF call (and PVS1 already covers the last).
+    # Deliberately NOT suppressed when BP4 fires: unlike PP2 (gene-level constraint),
+    # PM1 here is regional evidence independently validated against held-out de novo
+    # variants, so a benign computational prediction does not negate it.
+    # $1 is captured BEFORE the consequence match: a second successful regex with no
+    # capture groups clears it, which silently downgraded every PM1_Strong to PM1.
+    my $pm1_st = ($v{pm1} // "") =~ /^(Strong|Moderate)$/ ? $1 : "";
+    if ($pm1_st ne ""
+        && $v{consequence} =~ /missense_variant|inframe_(?:insertion|deletion)/) {
+        push @P, ($pm1_st eq "Strong" ? "PM1_Strong" : "PM1");
+    }
+
     # PP2: missense in a gene with a low rate of benign missense variation, from
     # gnomAD v4.1.1 missense constraint (mis.oe < $PP2_MIS_OE on the MANE transcript;
     # constraint outliers already excluded at load). PP2 counts INDEPENDENTLY of PP3
@@ -823,8 +921,14 @@ sub acmg_classify {
     #    BP4_Strong->BS, BP4_Moderate/_Supporting->BP). ──
     my $pvs = grep { $_ eq "PVS1" } @P;
     my $ps  = grep { /^PS\d/      } @P;            # PS1, PS2
-    my $pm  = grep { /^PM\d/      } @P;            # PM2, PM4, PM5, PM6
-    my $pp  = grep { $_ eq "PP2" || $_ eq "PP5" } @P;   # PP2 (missense constraint), PP5
+    # PM2_Supporting must NOT be counted here: it starts with "PM2", so a bare /^PM\d/
+    # would tally the downgraded criterion at Moderate anyway and silently undo it.
+    # _Strong is excluded here for the same reason as _Supporting: "PM1_Strong"
+    # starts with "PM1", so a bare /^PM\d/ would tally an upgraded criterion at
+    # Moderate and silently undo the upgrade.
+    my $pm  = grep { /^PM\d/ && !/_(?:Supporting|Strong)$/ } @P;   # PM2, PM4, PM5, PM6
+    my $pp  = grep { $_ eq "PP2" || $_ eq "PP5" || /^PM\d_Supporting$/ } @P;
+    $ps += grep { /^PM\d_Strong$/ } @P;            # PM1_Strong (PERv1 fold enrichment >= 18.7)
     $ps++ if $pp3 eq "strong";
     $pm++ if $pp3 eq "moderate";
     $pp++ if $pp3 eq "supporting";
@@ -1361,6 +1465,9 @@ foreach my $proband (@probands) {
         clnsig        => resolve($col,'ClinVar_CLNSIG','CLIN_SIG'),
         clnstars      => resolve($col,'ClinVar_CLNREVSTAT'),
         clndn         => resolve($col,'ClinVar_CLNDN'),
+        # PERv1 pathogenic-variant-enriched region overlap, for ACMG PM1. Optional:
+        # absent -> PM1 never fires (no warning; not every run annotates it).
+        per           => resolve($col,'PER'),
     );
 
     # [#3] Assert critical fields resolved — fail loudly, never silently pass-all.
@@ -1375,9 +1482,10 @@ foreach my $proband (@probands) {
     if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
 
     # Run statistics [#9].
-    my %stat = (lines=>0, multiallelic=>0, structural=>0, cohort_dropped=>0);
+    my %stat = (lines=>0, multiallelic=>0, structural=>0, cohort_dropped=>0, probes=>0);
 
     my %emit;            # EMIT pass: unique candidate variants
+    my %emit_probe;      # vid -> 1 for splice-discovery probes (counted once) [#5]
     my @rows;            # FINAL pass: buffered rows (for per-gene recessive logic)
     my %cohort_seen;     # [#11] vid -> 1 once dropped/logged (avoid double-counting)
 
@@ -1439,27 +1547,63 @@ foreach my $proband (@probands) {
             my $clinvar_established =
                 (clinvar_pathogenic($clnsig) && clinvar_stars($clnstars) >= 1) ? 1 : 0;
 
+            # HGVSc is needed BEFORE the gate (the splice probe reads its intron offset),
+            # so it is extracted here rather than in the final-pass block below.
+            my $hgvsc = field(\@r,$i{hgvsc});
+
             # Candidate structural gate: panel gene + whitelisted consequence + rare
             # (MOI-aware: recessive genes tolerate higher carrier freq). [#1,#6]
             my $cand_structural = 0;
             my ($p_assoc,$p_moi,$p_gdv) = ("","","");
+            if ($in_panel) { ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene}; $p_moi //= ""; }
             if ($in_panel && (consequence_ok($consequence) || $clinvar_established)) {
-                ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene};
-                $p_moi //= "";
                 my $recessive = moi_recessive($p_moi);
                 $cand_structural = ($clinvar_established
                                  || $freq <= ($recessive ? $FREQ_AR : $FREQ_AD)) ? 1 : 0;
             }
-            if ($LOOKUP) {                 # report-everything: force structural pass
-                $cand_structural = 1;
-                if ($in_panel) { ($p_assoc,$p_moi,$p_gdv) = split /\t/, $epigenes{$gene}; $p_moi //= ""; }
+            if ($LOOKUP) { $cand_structural = 1; }   # report-everything: force structural pass
+
+            # [#6] ACMG-SF genes must reach Pangolin too. The SF tier itself doesn't use a
+            # splice score, but without this every GDV=Incidental row carried a blank
+            # pangolin_score and could never earn BP7 or the splice rescue — a secondary
+            # finding was structurally denied the evidence a primary candidate gets.
+            my $sf_structural = 0;
+            if ($in_acmg && !$cand_structural
+                && (consequence_ok($consequence) || $clinvar_established)) {
+                $sf_structural = ($clinvar_established || $freq <= $SF_FREQ_MAX) ? 1 : 0;
             }
 
-            # Collect candidate structural-pass variants for Pangolin. Done in BOTH
-            # passes so the input CSV is (re)written with the full set even in the
-            # final pass (otherwise it would be emptied and the score cache wiped).
+            # [#5] Splice DISCOVERY probe — an intronic/synonymous variant that no gate
+            # would ever admit, scored so Pangolin can find a splice disruption in it.
+            # Bounded by intron distance and a strict rarity ceiling (see $SPLICE_PROBE).
+            # $g_an > 0 means the position actually EXISTS in the gnomAD resource. This is
+            # load-bearing, not a nicety. The custom VCF is gnomAD.joint.v4.1.**mane**, i.e.
+            # MANE transcripts plus flanks — deep intronic sequence is largely absent from
+            # it. A variant there gets AC=""/AN="" which this code coerces to 0, so $freq
+            # computes as 0 and passes ANY rarity ceiling, and PM2 ("absent or singleton in
+            # gnomAD") fires on what is really an annotation gap. Probing uncovered
+            # territory would therefore rescue variants with no working frequency filter and
+            # a manufactured pathogenic criterion. Requiring coverage bounds the probe set
+            # to where the resource can actually answer the question.
+            my $probe = 0;
+            if ($SPLICE_PROBE && !$LOOKUP && !$cand_structural && !$sf_structural
+                && ($in_panel || $in_acmg)
+                && (!$PROBE_REQUIRE_GNOMAD || $g_an > 0)
+                && $freq <= $PROBE_FREQ_MAX && !consequence_ok($consequence)) {
+                if ($consequence =~ /(?:^|&)synonymous_variant(?:&|$)/) {
+                    $probe = 1;                       # exonic splice-altering synonymous
+                } elsif ($consequence =~ /(?:^|&)intron_variant(?:&|$)/) {
+                    my $off = intron_offset($hgvsc);
+                    $probe = 1 if defined $off && $off <= $INTRON_MAX_DIST;
+                }
+            }
+
+            # Collect variants for Pangolin. Done in BOTH passes so the input CSV is
+            # (re)written with the full set even in the final pass (otherwise it would be
+            # emptied and the score cache wiped).
             $emit{$my_id} = "$chr,$start,$ref,$alt"
-                if $cand_structural && !exists $emit{$my_id};
+                if ($cand_structural || $sf_structural || $probe) && !exists $emit{$my_id};
+            $stat{probes}++ if $probe && !$emit_probe{$my_id}++;
             next unless $final;
             $stat{structural}++ if $cand_structural;
 
@@ -1476,7 +1620,6 @@ foreach my $proband (@probands) {
             my $g_nhom    = field(\@r,$i{g_nhom});
             my $g_filter  = field(\@r,$i{g_filter});
             my $strand    = field(\@r,$i{strand});
-            my $hgvsc     = field(\@r,$i{hgvsc});
             my $hgvsp     = field(\@r,$i{hgvsp});
             my $tpos      = field(\@r,$i{tpos});
             my $clnstar_n = clinvar_stars($clnstars);          # exact-variant review stars
@@ -1542,6 +1685,7 @@ foreach my $proband (@probands) {
 
             # ── Primary candidate inclusion gate (OR) [#4,#8] ──
             my (@kept, $class, $assoc, $moi, $gdv);
+            my $sf_ar = 0;
             if ($cand_structural) {
                 push @kept, "CADD"     if $cadd_num >= $CADD_MIN;
                 push @kept, "AM"       if $am_score ne "" && $am_score >= $AM_MIN;
@@ -1572,10 +1716,29 @@ foreach my $proband (@probands) {
                 if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
             }
 
+            # ── [#5] Splice-discovery rescue ──
+            # A probe is NOT a candidate. It entered the Pangolin set only so the model
+            # could look at it, and it earns a row solely on a positive splice score. A
+            # probe Pangolin scores low simply vanishes — which is what keeps the probe set
+            # from widening the table. Placed before the ACMG-SF block so a splice-active
+            # synonymous/intronic variant in a secondary-findings gene is reported as an
+            # incidental rather than being tested against the SF coding tiers it cannot meet.
+            if (!@kept && $probe && $pangolin ne "" && $pangolin >= $SPLICE_MIN) {
+                @kept = ("Pangolin");
+                if ($in_panel) {
+                    $class = "primary";
+                    ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv);
+                } else {
+                    my ($a_cond,$a_moi) = split /\t/, $acmg{$gene};
+                    $class = "incidental";
+                    ($assoc,$moi,$gdv) = ($a_cond, $a_moi//"", "Incidental");
+                    $sf_ar = (($a_moi//"") =~ /\bAR\b/) ? 1 : 0;
+                }
+            }
+
             # ── Incidental (ACMG SF) — stringent; only if not a primary candidate ──
             # ClinVar P/LP (>=1 star) reported regardless of frequency (known founder
             # alleles); novel LoF / >=2-strong-computational tiers require rarity.
-            my $sf_ar = 0;
             if (!@kept && $in_acmg) {
                 my ($a_cond,$a_moi,$a_cat) = split /\t/, $acmg{$gene};
                 my $cat_ok =
@@ -1689,14 +1852,36 @@ foreach my $proband (@probands) {
             }
 
             # ── [#2] Automated ACMG/AMP classification (triage) ──
+            # ── PM1: PERv1 region overlap (see acmg_classify) ──
+            # VEP emits the BED name field; "/"-delimited, "&"-joined if a variant
+            # falls in more than one region. The gene is carried in the name so the
+            # region can be checked against the gene of THIS CSQ record: overlapping
+            # MANE gene models co-locate in a real exome, and a PER belongs to the
+            # gene it was computed on, not to whatever else spans those bases.
+            my $per_raw = defined $i{per} ? ($r[$i{per}] // "") : "";
+            my ($pm1_strength, $pm1_detail) = ("", "");
+            if ($per_raw ne "") {
+                for my $hit (split /&/, $per_raw) {
+                    my @pf = split m{/}, $hit;
+                    next unless @pf >= 3;
+                    next unless defined $gene && $gene ne "" && $pf[0] eq $gene;
+                    my ($st) = $pf[2] =~ /^PM1_(Strong|Moderate)$/ or next;
+                    # Keep the strongest region if several overlap.
+                    next if $pm1_strength eq "Strong";
+                    $pm1_strength = $st;
+                    $pm1_detail   = join("/", @pf[3 .. $#pf]);
+                }
+            }
+
             my $gt_susp = grep { /^(lowDP|lowGQ|AB_)/ } @qc;   # GT/DP suspicious?
             my ($acmg_class,$acmg_crit) = acmg_classify(
                 consequence=>$consequence, lof_type=>$lof_type, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
-                ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
+                ac=>$g_ac, an=>$g_an, probe=>$probe, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, PP5/BP6 star-gate
                 mis_oe=>mis_oe_for($gene),                                    # PP2 (missense constraint)
+                pm1=>$pm1_strength,                                            # PM1 (PERv1 region)
                 de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
 
             # A pathogenic-leaning auto-class that carries a hard benign line (ClinVar
@@ -1709,6 +1894,19 @@ foreach my $proband (@probands) {
             # disagreeing with PVS1/PM2 is routine, not a contradiction.
             push @qc, "clinvar_conflict"
                 if $acmg_class =~ /athogenic/ && $acmg_crit =~ /(?:^|,)(BP6|BS1|BS2|BA1)(?:,|$)/;
+
+            # Which PER earned PM1, so the curator can audit the call rather than
+            # take "PM1_Strong" on trust.
+            push @qc, "PM1:$pm1_detail"
+                if $acmg_crit =~ /(?:^|,)PM1(?:_Strong)?(?:,|$)/ && $pm1_detail ne "";
+
+            # PM1 and PS1/PM5 both drawing on ClinVar at the same residue is not
+            # blocked -- PER regional evidence is validated independently of the
+            # individual submissions -- but ClinGen SVI cautions against reusing one
+            # piece of evidence twice, so the co-occurrence is surfaced for the
+            # curator to rule on.
+            push @qc, "PM1_with_" . lc($aa_crit)
+                if $aa_crit && $acmg_crit =~ /(?:^|,)PM1(?:_Strong)?(?:,|$)/;
             $qc_flag = join(";", @qc);
 
             # Combined HGVS: TRANSCRIPT:c.… (p.…)  [protein accession stripped from HGVSp].
@@ -1728,7 +1926,7 @@ foreach my $proband (@probands) {
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
-                class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar, qc=>$qc_flag,
+                class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar, qc=>$qc_flag, probe=>$probe,
                 transcript=>$transcript, mane_select=>(field(\@r,$i{mane_select}) ne "" ? 1 : 0),
                 data=>{
                     # END spans the REF allele (start + len(REF) - 1), so an indel reports
@@ -1766,7 +1964,10 @@ foreach my $proband (@probands) {
     }
 
     if (!$final) {
-        printf "  EMIT: %d structural-pass variants -> %s\n", scalar(keys %emit), $csv;
+        printf "  EMIT: %d variants -> %s (%d candidate/SF + %d splice-discovery probe%s)\n",
+               scalar(keys %emit), $csv,
+               scalar(keys %emit) - $stat{probes}, $stat{probes},
+               ($stat{probes} == 1 ? "" : "s");
         printf "  Run Pangolin on it (run_filtering.sh) to create %s, then re-run.\n", $tsv;
         next;
     }
@@ -1930,8 +2131,10 @@ foreach my $proband (@probands) {
 
         # ── [#9] Run summary ──
         my ($n_prim,$n_inc) = (0,0);
+        my $n_probe_kept = 0;
         my (%by_arm,%by_inh,%by_flag);
         for my $row (@rows) {
+            $n_probe_kept++ if $row->{probe};
             $row->{class} eq "incidental" ? $n_inc++ : $n_prim++;
             $by_arm{$_}++ for split /;/, $row->{data}{kept_by};
             $by_inh{$row->{data}{inheritance}}++;
@@ -1943,6 +2146,8 @@ foreach my $proband (@probands) {
         # on two MANE transcripts counted twice and the two passes disagreed on identical input.
         printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
                $stat{lines}, $stat{multiallelic}, scalar(keys %emit), $n_prim, $n_inc;
+        printf "  splice discovery: %d probe(s) scored, %d rescued by Pangolin >= %s\n",
+               $stat{probes}, $n_probe_kept, $SPLICE_MIN if $SPLICE_PROBE && $stat{probes};
         printf "  cohort_artifact: %d variant(s) dropped (recurrent in >=%d%% of cohort & gnomAD-absent)\n",
                $stat{cohort_dropped}, int($COHORT_MAX_FRAC*100 + 0.5)
             if $cohort_on && !$KEEP_COHORT_ARTIFACTS && $stat{cohort_dropped};
