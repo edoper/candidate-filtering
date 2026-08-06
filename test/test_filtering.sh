@@ -13,6 +13,10 @@
 #                                       the one real candidate is kept, and a common
 #                                       variant, a synonymous one, a non-panel gene and a
 #                                       solitary AR-gene het (carrier) are all dropped.
+#   5. Consult mode + BP7             — --lookup output is namespaced, BP7 needs a real score
+#   6. Batch-level table              — batch.<panel>.candidatos agrees with the per-proband one
+#   7. Genotype + criterion edges     — haploid (hemizygous) GT, plain-XL MOI, the PP5 review-star
+#                                       gate, per-gene row collapse, clinvar_conflict flagging
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -72,7 +76,7 @@ csq() { # <gene> <consequence> <cadd> <am_score> <ac> <an> [clnsig] [clnrevstat]
 }
 STAR1='criteria_provided,_single_submitter'
 # A dual-inheritance gene (MOI lists both AD and AR): its solitary hets pass through
-# as dominant candidates, which is what the recessive_flag row-consistency check needs.
+# as dominant candidates, which is what the recessive-flag row-consistency check needs.
 DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO/g4e-2026.txt")
 [ -n "$DUAL_GENE" ] || { echo "  FAIL  no dual-inheritance gene in the panel"; exit 1; }
 {
@@ -107,7 +111,7 @@ DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO
   printf 'chr2\t9000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:0,40:40:99\n' "$(csq "$DUAL_GENE" missense_variant 30 0.99 0 0)"
   printf 'chr2\t9500\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$DUAL_GENE" missense_variant 30 0.99 0 0)"
   # KEEP: homozygous variant in a purely DOMINANT gene. Recessive reasoning does not
-  # apply to such genes, so it must carry no recessive_flag despite being hom.
+  # apply to such genes, so it must carry no recessive flag despite being hom.
   printf 'chr2\t10000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:0,40:40:99\n' "$(csq "$PANEL_GENE" missense_variant 30 0.99 0 0)"
 } | bgzip -c > "$TD/TESTFAM-P.germline.vep.vcf.gz"
 
@@ -135,6 +139,13 @@ else
                                   || ok "solitary AR-gene het dropped (carrier rule)"
     row() { awk -F'\t' -v p="$1" 'NR>1 && $2==p' "$OUT"; }          # a data row by POS
     col() { awk -F'\t' -v p="$1" -v c="$2" 'NR>1 && $2==p{print $c}' "$OUT"; }
+    # Resolve a column by HEADER NAME, the way filtering_r.pl resolves CSQ fields.
+    # Hard-coded indices silently pointed at a neighbouring column when the table
+    # changed shape (recessive_flag + qc_flag became one `flags` column).
+    ncol() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if($i==n){print i; exit}}' "$OUT"; }
+    # One ';'-separated component of the consolidated flags field, by POS.
+    hasflag() { awk -F'\t' -v p="$1" -v c="$2" -v f="$3" \
+                    'NR>1 && $2==p{n=split($c,a,";"); for(i=1;i<=n;i++) if(a[i]==f){print "yes"; exit}}' "$OUT"; }
 
     # An established ClinVar classification outranks the rarity ceiling and the
     # consequence whitelist — both gates otherwise fire before any evidence is read.
@@ -147,20 +158,25 @@ else
     [ "$e" = "8002" ] && ok "indel END spans the REF allele (8000 CAA/C -> 8002)" \
                       || bad "indel END wrong: got '${e:-none}', expected 8002"
 
+    FC=$(ncol flags); ZC=$(ncol zygosity)
+    [ -n "$FC" ] && ok "consolidated 'flags' column present in the header" \
+                 || bad "no 'flags' column in the output header"
+
     if [ -n "$(row 9500)" ] && [ -n "$(row 9000)" ]; then
-        rf=$(col 9500 36); zh=$(col 9000 36)
-        [ "$rf" != "HOM" ] && ok "het row not labelled HOM by a hom variant elsewhere in the gene" \
-                           || bad "het row carries recessive_flag=HOM while zygosity=$(col 9500 27)"
-        [ "$zh" = "HOM" ]  && ok "hom row still labelled HOM" \
-                           || bad "hom row lost its HOM label (got '${zh:-empty}')"
+        [ -z "$(hasflag 9500 "$FC" HOM)" ] \
+            && ok "het row not labelled HOM by a hom variant elsewhere in the gene" \
+            || bad "het row carries HOM in flags while zygosity=$(col 9500 "$ZC")"
+        [ -n "$(hasflag 9000 "$FC" HOM)" ] \
+            && ok "hom row still labelled HOM" \
+            || bad "hom row lost its HOM label (flags='$(col 9000 "$FC")')"
     else
         bad "dual-inheritance gene rows missing from output"
     fi
 
-    dh=$(col 10000 36)
-    [ -n "$(row 10000)" ] && [ -z "$dh" ] \
-        && ok "hom row in a purely dominant gene carries no recessive_flag" \
-        || bad "dominant-gene hom row got recessive_flag='${dh:-?}' (expected empty)"
+    dh=$(col 10000 "$FC")
+    [ -n "$(row 10000)" ] && [ -z "$(hasflag 10000 "$FC" HOM)" ] \
+        && ok "hom row in a purely dominant gene carries no recessive flag" \
+        || bad "dominant-gene hom row got flags='${dh:-?}' (expected no HOM)"
 
     [ "$nrow" -eq 7 ] && ok "exactly 7 candidate rows (common, synonymous, off-panel, carrier dropped)" \
                       || bad "expected 7 rows, got $nrow (POS: $(awk -F'\t' 'NR>1{print $2}' "$OUT" | tr '\n' ' '))"
@@ -197,6 +213,127 @@ if [ -n "${OUT:-}" ]; then
                          || bad "BP7 did not fire despite a sub-threshold Pangolin score"
 else
     bad "skipping consult tests — section 4 produced no candidatos"
+fi
+
+# ─────────────── 6: batch-level table ───────────────
+echo "== 6. batch-level table =="
+BATCH=$(ls "$TD"/batch.*.candidatos 2>/dev/null | head -1)
+if [ -n "$BATCH" ]; then
+    ok "wrote $(basename "$BATCH")"
+    [ "$(head -1 "$BATCH" | cut -f1)" = "sample" ] \
+        && ok "batch table's first column is 'sample'" \
+        || bad "batch table's first column is '$(head -1 "$BATCH" | cut -f1)', expected 'sample'"
+    # Same rows as the per-proband table, plus the sample prefix — the two must agree,
+    # otherwise the batch view and the per-case view tell a curator different stories.
+    nb=$(awk 'NR>1' "$BATCH" | wc -l)
+    [ "$nb" -eq "${nrow:-0}" ] && ok "batch rows match the per-proband table ($nb)" \
+                              || bad "batch has $nb rows, per-proband table has ${nrow:-0}"
+    [ "$(awk -F'\t' 'NR>1{print $1}' "$BATCH" | sort -u)" = "TESTFAM-P" ] \
+        && ok "batch rows carry the proband id" \
+        || bad "unexpected sample ids in batch table"
+    [ "$(head -1 "$BATCH" | cut -f2-)" = "$(head -1 "$OUT")" ] \
+        && ok "batch columns 2..N are identical to the per-proband header" \
+        || bad "batch header diverges from the per-proband header"
+else
+    bad "no batch.*.candidatos produced"
+fi
+
+# ─────────────── 7: haploid genotypes, X-linked genes, PP5 star gate ───────────────
+# Everything here is a genotype/criterion case that a WGS/DRAGEN run hits routinely but
+# the synthetic autosomal fixture above cannot reach.
+echo "== 7. haploid GT, X-linked MOI, PP5 star gate, per-gene collapse =="
+XD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD"' EXIT
+for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+    ln -sf "$REPO/$f" "$XD/$f"
+done
+# A plain "XL" gene — the g4e vocabulary for X-linked genes with no XLD/XLR split.
+XL_GENE=$(awk -F'\t' '!/^#/ && $3=="XL" {print $1; exit}' "$REPO/g4e-2026.txt")
+TX2=$(grep -m2 '^ENST' "$REPO/mane-plus-clinical-names.txt" | tail -1 | cut -f1)
+GENE_B=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1}' "$REPO/g4e-2026.txt" | sed -n 2p)
+[ -n "$XL_GENE" ] && [ -n "$GENE_B" ] || { echo "  FAIL  could not pick XL/second AD gene"; exit 1; }
+NOSTAR='no_assertion_criteria_provided'
+csq2() { # like csq() but with an explicit transcript as $9
+  printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||%s|likely_pathogenic|%s||||%s|%s|0|0|PASS|%s|%s|' \
+         "$1" "${9:-$MANE_TX}" "${9:-$MANE_TX}" "$2" "$3" "$4" "$5" "$6" "${7:-}" "${8:-}"
+}
+xhdr() {
+  echo '##fileformat=VCFv4.2'
+  echo '##contig=<ID=chr2,length=250000000>'
+  echo '##contig=<ID=chrX,length=156040895>'
+  echo '##FILTER=<ID=PASS,Description="p">'
+  echo '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">'
+  echo '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">'
+  echo '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="DP">'
+  echo '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">'
+  echo "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: $CSQ\">"
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "$1"
+}
+{
+  xhdr XFAM-P
+  # HEMIZYGOUS male call in an X-linked gene: DRAGEN emits a single-allele GT.
+  # No in-silico support at all — it must survive on the AR_hem rescue alone.
+  printf 'chrX\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1:0,40:40:99\n' "$(csq "$XL_GENE" missense_variant 5 0.10 0 0)"
+  # ClinVar Pathogenic with ZERO review stars: kept by the ClinVar rescue arm, but
+  # must NOT earn PP5 (which now requires >=1 star, like every other ClinVar consumer).
+  printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" missense_variant 5 0.10 0 0 Pathogenic "$NOSTAR")"
+  # One position annotated onto TWO overlapping MANE gene models. Both are panel genes
+  # and both pass the gates, so both rows must survive the one-row-per-variant collapse.
+  printf 'chr2\t3000\t.\tG\tA\t500\tPASS\tCSQ=%s,%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+         "$(csq2 "$PANEL_GENE" missense_variant 30 0.99 0 0 '' '' "$MANE_TX")" \
+         "$(csq2 "$GENE_B"     missense_variant 30 0.99 0 0 '' '' "$TX2")"
+  # Truncating + gnomAD-absent (PVS1,PM2 -> Likely_pathogenic) but ClinVar says BENIGN
+  # with a review star (BP6). The combining rules cannot express this, so the class
+  # stays LP and the row must be flagged clinvar_conflict instead.
+  printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" stop_gained 35 0.99 0 0 Benign "$STAR1")"
+} | bgzip -c > "$XD/XFAM-P.germline.vep.vcf.gz"
+# Father: hemizygous for the same chrX variant. He can only be seen as a carrier if
+# haploid GTs parse — otherwise the son's variant is called de novo.
+{ xhdr XFAM-F
+  printf 'chrX\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1:0,40:40:99\n' "$(csq "$XL_GENE" missense_variant 5 0.10 0 0)"
+} | bgzip -c > "$XD/XFAM-F.germline.vep.vcf.gz"
+
+( cd "$XD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >xpass1.log 2>&1 )
+XIN=$(ls "$XD"/XFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
+[ -n "$XIN" ] && : > "${XIN%.pangolin_input.csv}.pangolin.tsv"
+( cd "$XD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >xpass2.log 2>&1 )
+XOUT=$(ls "$XD"/XFAM-P.*.candidatos 2>/dev/null | head -1)
+
+if [ -z "$XOUT" ]; then
+    bad "section 7 produced no candidatos"; tail -15 "$XD/xpass2.log" | sed 's/^/      /'
+else
+    xcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i; next} $2==p{print $h[n]}' "$XOUT"; }
+    z=$(xcol zygosity 1000)
+    [ "$z" = "hem" ] && ok "haploid GT=1 reported as zygosity 'hem'" \
+                     || bad "haploid GT=1 gave zygosity '${z:-empty}' (expected hem)"
+    k=$(xcol kept_by 1000)
+    case "$k" in *AR_hem*) ok "hemizygous X variant rescued by AR_hem (XL gene treated as recessive-capable)";;
+                 *) bad "hemizygous X variant not rescued: kept_by='${k:-none}'";; esac
+    f=$(xcol flags 1000)
+    case ";$f;" in *";HEM;"*) ok "hemizygous row flagged HEM";;
+                   *) bad "hemizygous row flags='${f:-empty}' (expected HEM)";; esac
+    inh=$(xcol inheritance 1000)
+    [ "$inh" = "IF" ] && ok "hemizygous father recognised as carrier (inheritance=IF, not de novo)" \
+                      || bad "inheritance='${inh:-empty}' (expected IF; a hemizygous parent was invisible)"
+
+    crit=$(xcol acmg_criteria 2000)
+    [ -n "$(awk -F'\t' 'NR>1 && $2==2000' "$XOUT")" ] \
+        && ok "0-star ClinVar P/LP still kept by the ClinVar rescue arm" \
+        || bad "0-star ClinVar P/LP variant was dropped"
+    case ",$crit," in *,PP5,*) bad "PP5 fired on a 0-star ClinVar submission (criteria=$crit)";;
+                      *) ok "PP5 withheld on a 0-star ClinVar submission";; esac
+
+    ng=$(awk -F'\t' 'NR>1 && $2==3000' "$XOUT" | wc -l)
+    [ "$ng" -eq 2 ] && ok "overlapping gene models both survive the collapse (2 rows at one position)" \
+                    || bad "collapse kept $ng row(s) at the two-gene position, expected 2"
+
+    cls=$(xcol acmg_class 4000); ccr=$(xcol acmg_criteria 4000); cfl=$(xcol flags 4000)
+    case "$ccr" in *BP6*) ok "BP6 fired on the starred ClinVar-Benign truncating variant";;
+                    *) bad "BP6 missing on a 1-star ClinVar Benign variant (criteria=$ccr)";; esac
+    case "$cls" in *athogenic*) ok "contradictory row still auto-classed $cls (class left alone by design)";;
+                   *) bad "expected a pathogenic-leaning class, got '$cls'";; esac
+    case ";$cfl;" in *";clinvar_conflict;"*) ok "contradiction surfaced as flags=clinvar_conflict";;
+                     *) bad "no clinvar_conflict flag on $cls with criteria=$ccr (flags='${cfl:-empty}')";; esac
 fi
 
 echo

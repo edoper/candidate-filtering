@@ -112,13 +112,32 @@ EOF
     | bgzip > "$VEP_INPUT"
 fi
 
-# ── Split multiallelic sites (one ALT per record) ──
+# ── Split multiallelic sites (one ALT per record) + left-align ──
 # Keeps downstream chr-pos-ref-alt keys unambiguous (filtering_r.pl, inheritance,
-# Pangolin input). Split only (-m-any), no --check-ref, to avoid dropping records.
-echo "[vep] Splitting multiallelic sites (bcftools norm -m-any)"
+# Pangolin input).
+#
+# LEFT-ALIGNMENT IS NOT OPTIONAL for the annotations we join. Both custom sources
+# (gnomAD v4.1, ClinVar) are attached with `type=exact`, which matches on position AND
+# allele, and both store indels in minimal left-aligned form. Splitting a multiallelic
+# record without -f leaves the split alleles in the parent record's padded, non-minimal
+# representation (chr1 100 AT ATT,A -> AT>ATT, where gnomAD holds the same allele at
+# 101 T>TT), so the join silently misses. The variant then reports AC=0 — which this
+# pipeline reads as "absent from gnomAD" — and collects PM2 for it. Indels were hit
+# roughly 1.6x as often as SNVs before this was fixed.
+#
+# -f re-aligns and trims to the reference. Still no --check-ref, so a REF mismatch
+# warns rather than dropping the record.
+echo "[vep] Splitting multiallelic sites + left-aligning (bcftools norm -m-any -f)"
 NORM_INPUT="$(mktemp -u --suffix=.vcf.gz)"
 CLEANUP+=("$NORM_INPUT")
-bcftools norm -m-any "$VEP_INPUT" -Oz -o "$NORM_INPUT"
+if [ -s "${REF_FASTA:-}" ]; then
+    bcftools norm -m-any -f "$REF_FASTA" "$VEP_INPUT" -Oz -o "$NORM_INPUT"
+else
+    echo "[vep] WARNING: REF_FASTA unset or missing — splitting WITHOUT left-alignment." >&2
+    echo "[vep]          Indels may miss the gnomAD/ClinVar exact-match join (spurious AC=0 -> PM2)." >&2
+    echo "[vep]          Set REF_FASTA in site.env to a chr-named GRCh38 FASTA." >&2
+    bcftools norm -m-any "$VEP_INPUT" -Oz -o "$NORM_INPUT"
+fi
 VEP_INPUT="$NORM_INPUT"
 
 # ── Run VEP ──

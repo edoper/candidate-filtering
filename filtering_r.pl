@@ -50,7 +50,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    HOM/CompHet flag, so two independent hets are not mislabeled comp-het. [#6,#7]
 #  * Dual-inheritance genes (MOI lists BOTH AD and AR, e.g. "AD, AR") are treated
 #    as DOMINANT for the carrier drop: a solitary het passes through as a candidate
-#    (recessive_flag empty), while a genuine hom/comp-het still gets the recessive
+#    (no recessive flag), while a genuine hom/comp-het still gets the recessive
 #    flag. Pure AR/XLR genes use the recessive path below.                    [#5]
 #  * Recessive carriers (DEFAULT = drop): a solitary het in a PURE recessive (AR/XLR)
 #    gene that is not biallelic is DROPPED (a single het can't explain recessive disease;
@@ -58,7 +58,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    gate-passing hets is a biallelic CompHet and kept. OPT-IN --keep-ar-carriers /
 #    KEEP_AR_CARRIERS=1 surfaces the STRONG such carriers (carrier-only tier: ClinVar
 #    P/LP >=1*, HC-LoF, or >=2 strong predictors AM>=0.906/CADD>=28.1/EVE-path/REVEL>=
-#    0.773, not Benign/LB; flagged recessive_flag=carrier-only) for second-hit hunts. [#1,#2,#6]
+#    0.773, not Benign/LB; flagged flags=carrier-only) for second-hit hunts. [#1,#2,#6]
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
 #  * ACMG SF secondary findings: the 81 ACMG SF v3.2 genes are ALWAYS scanned
@@ -84,7 +84,8 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    dropped — both conditions required, so population bottlenecks / founder alleles
 #    (which carry a gnomAD footprint) are preserved. OFF for single-variant, forced/
 #    single-proband, and small runs. --keep-cohort-artifacts keeps+tags instead. [#11]
-#  * QC / artifact flags (qc_flag): lowDP, lowGQ, AB_het/AB_hom, homopolymer
+#  * QC / artifact flags (in the consolidated `flags` column, after the recessive
+#    verdict): lowDP, lowGQ, AB_het/AB_hom, homopolymer, clinvar_conflict,
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
 #    parental reference depth — DN is flagged DN_unconfirmed by design.      [#6]
@@ -149,10 +150,28 @@ my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
 # (--proband) runs never activate it, and trios/duos/small runs are untouched
 # (a per-variant or per-proband consult has no cohort to compare against). Logged;
 # --keep-cohort-artifacts (env KEEP_COHORT_ARTIFACTS=1) keeps them instead, tagged
-# qc_flag=cohort_artifact — for a founder-enriched cohort, review the drop log, as a
+# flags=cohort_artifact — for a founder-enriched cohort, review the drop log, as a
 # genuinely private founder allele would surface there.
-my $COHORT_MIN      = 10;    # min cohort size to activate the filter (below -> OFF)
-my $COHORT_MAX_FRAC = 0.25;  # carried by >= this fraction of the cohort -> "recurrent"
+# THRESHOLDS (revised 2026-08). The filter previously needed >= 10 probands, which no
+# real internal batch reaches — batches run 6-9 samples — so it had never once fired on
+# a clinical run, and the recurrent KMT2C/SYNE1 mismapping artifacts reached every
+# delivered table. Two changes make it work at the batch sizes actually used:
+#
+#   1. $COHORT_MIN 10 -> 5 samples. Five unrelated genomes are enough to tell a
+#      systematic artifact from a private allele when gnomAD-absence is also required.
+#   2. A new ABSOLUTE floor, $COHORT_MIN_CARRIERS, on top of the fraction. At N=8 the
+#      25% fraction alone means 2 carriers, and two unrelated Chilean probands sharing
+#      a gnomAD-absent allele is an ordinary founder/relatedness event, not evidence of
+#      a technical artifact. Requiring >= 3 carriers AND >= 25% keeps both ends honest:
+#      the floor binds on small batches, the fraction binds on large cohorts (at N=56,
+#      25% = 14 carriers, well above the floor).
+#
+# Measured on batch4 (8 singleton probands), the carrier distribution is bimodal with a
+# clean gap: the four artifacts sit at 5,6,7,8 of 8 carriers (63-100%) and the next most
+# recurrent candidate is 2 of 8 (25%). Both new thresholds fall inside that gap.
+my $COHORT_MIN          = 5;     # min samples to activate the filter (below -> OFF)
+my $COHORT_MAX_FRAC     = 0.25;  # carried by >= this fraction of the cohort -> "recurrent"
+my $COHORT_MIN_CARRIERS = 3;     # ...AND by at least this many samples, whatever the fraction
 
 # Ensembl REST endpoint for HGVS->coordinate recoding in -v variant mode
 # (override with $ENSEMBL_REST; point at a private mirror on an air-gapped host).
@@ -194,7 +213,23 @@ my $CONSTRAINT_FILE = 'gnomad-mis-constraint.txt';   # gene -> mis.oe / mis.z / 
 #   perl filtering_r.pl --selftest-cohort
 run_cohort_selftest() if grep { $_ eq '--selftest-cohort' } @ARGV;
 
-open MANE, "<mane-plus-clinical-names.txt" or die "mane: $!";
+# ── Where the tracked reference data lives ──
+# Resolve each reference file from the CURRENT directory first (so a run directory can
+# drop in its own panel), then from the script's own directory. Without this every
+# reference file was opened by bare relative name, so the documented $WORKDIR override
+# only worked if you symlinked the whole repo into the run directory — which is exactly
+# what the per-sample batch directories had been doing.
+my $CF_REPO = $0;
+$CF_REPO = ($CF_REPO =~ s{/[^/]+$}{}r);
+$CF_REPO = "." if $CF_REPO eq $0 || $CF_REPO eq "";
+sub ref_file {
+    my ($f) = @_;
+    return $f if -e $f;
+    return "$CF_REPO/$f" if -e "$CF_REPO/$f";
+    return $f;                      # let the caller's open() report the error
+}
+
+open MANE, "<", ref_file("mane-plus-clinical-names.txt") or die "mane: $!";
 my %mane;
 while (my $m = <MANE>) { chomp $m; my ($a,$b) = split /\t/, $m; $mane{$a} = $b; }
 close MANE;
@@ -203,8 +238,21 @@ print "hash mane, listo!\n";
 # gnomAD v4.1.1 missense constraint (MANE Select): gene -> mis.oe, for the ACMG PP2
 # criterion. Genes flagged as missense-constraint outliers (outlier_mis / no_exp_mis)
 # are skipped so they can never earn PP2. Optional file — absent -> PP2 simply never fires.
+# gnomAD v4.1.1 predates several HGNC symbol changes, so a current panel/VEP symbol
+# can miss its own constraint record and silently forfeit PP2. These five are confirmed
+# renames where the OLD symbol is present in the constraint file (verified by lookup);
+# every other panel gene absent from the file is genuinely absent (mitochondrial, snRNA/
+# snoRNA, or not MANE Select in v4.1.1) and has no missense constraint to inherit.
+my %GENE_ALIAS = (
+    GBA1  => 'GBA',        # HGNC 2022
+    BMAL1 => 'ARNTL',      # HGNC 2023
+    AFG2A => 'SPATA5',     # HGNC 2022
+    AFG2B => 'SPATA5L1',   # HGNC 2022
+    BLTP1 => 'KIAA1109',   # HGNC 2023
+);
+
 my %mis_oe;
-if (open my $mc, "<", $CONSTRAINT_FILE) {
+if (open my $mc, "<", ref_file($CONSTRAINT_FILE)) {
     while (my $l = <$mc>) {
         next if $l =~ /^#/ || $l !~ /\S/;
         chomp $l;
@@ -218,6 +266,16 @@ if (open my $mc, "<", $CONSTRAINT_FILE) {
            scalar keys %mis_oe, $PP2_MIS_OE;
 } else {
     warn "NOTE: $CONSTRAINT_FILE not found — ACMG PP2 disabled (missense constraint unavailable)\n";
+}
+
+# Missense o/e for a gene symbol, falling back to its pre-rename symbol. Returns
+# undef when the gene has no constraint record (PP2 then simply never fires).
+sub mis_oe_for {
+    my ($g) = @_;
+    return undef unless defined $g && $g ne "";
+    return $mis_oe{$g} if exists $mis_oe{$g};
+    my $alias = $GENE_ALIAS{$g};
+    return (defined $alias && exists $mis_oe{$alias}) ? $mis_oe{$alias} : undef;
 }
 
 # ── Argument parsing ──
@@ -237,10 +295,10 @@ my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
 # DROPPED (biallelic-only; carrier states are clinical noise, and true comp-hets are kept
 # independently via the CompHet flag). Set KEEP_AR_CARRIERS=1 or --keep-ar-carriers to
 # SURFACE the strong such carriers (carrier-only tier: strong-evidence & not benign,
-# flagged recessive_flag=carrier-only; see the [#1,#2] block) — e.g. to chase a possible
+# flagged flags=carrier-only; see the [#1,#2] block) — e.g. to chase a possible
 # missed second hit (deep-intronic, CNV) in a targeted investigation.
 my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
-# Keep (don't drop) cohort recurrent-artifact variants, tagging them qc_flag=
+# Keep (don't drop) cohort recurrent-artifact variants, tagging them flags=
 # cohort_artifact instead. Env KEEP_COHORT_ARTIFACTS=1 or CLI --keep-cohort-artifacts.
 my $KEEP_COHORT_ARTIFACTS = $ENV{KEEP_COHORT_ARTIFACTS} ? 1 : 0;
 while (@ARGV) {
@@ -276,7 +334,7 @@ $PANEL_TAG =~ s{.*/}{};
 $PANEL_TAG =~ s/\.[^.]+$//;
 $PANEL_TAG =~ s/-\d{4}$//;               # drop trailing year suffix (g4e-2026 -> g4e)
 
-open PANEL, "<", $PANEL or die "gene panel '$PANEL': $!";
+open PANEL, "<", ref_file($PANEL) or die "gene panel '$PANEL': $!";
 my %epigenes;
 while (my $g = <PANEL>) {
     $g =~ s/\r?\n$//;
@@ -290,8 +348,18 @@ close PANEL;
 printf "gene panel: %s (%d genes%s)\n", $PANEL, scalar(keys %epigenes),
        $custom_panel ? ", custom — missing Association/MOI/GDV = NA" : "";
 
+# PP2 coverage. A panel gene with no constraint record can never earn PP2, and the
+# failure is otherwise invisible — report it once at startup instead of letting the
+# criterion go quietly missing for part of the panel.
+if (%mis_oe) {
+    my @no_constraint = sort grep { !defined mis_oe_for($_) } keys %epigenes;
+    printf "PP2 coverage: %d/%d panel genes have gnomAD missense constraint%s\n",
+           scalar(keys %epigenes) - scalar(@no_constraint), scalar(keys %epigenes),
+           @no_constraint ? " — no record for: ".join(" ", @no_constraint) : "";
+}
+
 # Consequence whitelist (atomic terms recommended; compound entries harmless).
-open VAR, "<typevar.txt" or die "typevar: $!";
+open VAR, "<", ref_file("typevar.txt") or die "typevar: $!";
 my %varfilter;
 while (my $t = <VAR>) { chomp $t; my ($c,$d) = split /\t/, $t; $varfilter{$c} = $d//""; }
 close VAR;
@@ -300,7 +368,7 @@ print "hash var, listo!\n";
 # ACMG SF v3.2 genes: gene -> "condition \t MOI \t report_category". Always loaded
 # (independent of the candidate panel). Non-fatal if absent.
 my %acmg;
-if (open my $afh, "<", $ACMG_FILE) {
+if (open my $afh, "<", ref_file($ACMG_FILE)) {
     while (my $g = <$afh>) {
         chomp $g; next if $g =~ /^#/ || $g !~ /\S/;
         my ($sym,$cond,$moi,$cat) = split /\t/, $g;
@@ -392,15 +460,29 @@ sub parse_call {
     return ($gt,$dp,$gq,$ar,$aa);
 }
 
-# Zygosity from a GT string: hom (alt/alt), het (ref/alt), ref, or "" (no-call).
+# Zygosity from a GT string: hom (alt/alt), het (ref/alt), hem (haploid alt), ref,
+# or "" (no-call).
+# HAPLOID CALLS: DRAGEN (and GATK with -ploidy 1) emit a single-allele GT — "1" or
+# "0" — for non-PAR chrX/chrY in males and for chrM. Requiring two alleles made those
+# calls return "", which silently cost them their zygosity (no HOM flag, no AR_hom
+# rescue, no AB_hom QC) and, worse, made a hemizygous parent invisible to load_parent
+# so an INHERITED X-linked variant was reported as de novo. A hemizygous call is a
+# complete genotype, not half a het: it is reported as "hem" and treated as biallelic-
+# equivalent everywhere the recessive logic asks "is this genotype sufficient?".
 sub zygosity {
     my ($gt) = @_;
     return "" unless defined $gt && $gt ne "";
     my @a = split /[\/|]/, $gt;
-    return "" unless @a >= 2 && $a[0] ne "." && $a[1] ne ".";
+    return "" unless @a && !grep { $_ eq "." || $_ eq "" } @a;
     my $n1 = grep { $_ eq "1" } @a;
+    return $n1 ? "hem" : "ref" if @a == 1;          # haploid (non-PAR X/Y male, chrM)
     return $n1 >= 2 ? "hom" : $n1 == 1 ? "het" : "ref";
 }
+
+# Is this genotype a complete (non-carrier) recessive genotype on its own?
+# Homozygous alt, or hemizygous alt on a haploid contig — both leave no second
+# wild-type allele, so neither is a "carrier" state.
+sub zyg_biallelic { my $z = shift // ""; return ($z eq "hom" || $z eq "hem") ? 1 : 0; }
 
 # Parent carrier map: chr-pos-ref-alt -> "gt:dp:gq" if the parent carries the ALT
 # (GT contains a '1'); records with 0/0 or no-call are NOT carriers. The DP/GQ are
@@ -418,7 +500,8 @@ sub load_parent {
         next if $alt =~ /,/;                       # should be pre-split
         my ($gt,$dp,$gq) = parse_call($fmt,$smp);
         my $z = zygosity($gt);
-        $carry{"$chr-$pos-$ref-$alt"} = "$gt:$dp:$gq" if $z eq "het" || $z eq "hom";
+        # "hem" counts: a hemizygous father IS a carrier of the allele he transmits.
+        $carry{"$chr-$pos-$ref-$alt"} = "$gt:$dp:$gq" if $z eq "het" || $z eq "hom" || $z eq "hem";
     }
     close $fh;
     return \%carry;
@@ -457,10 +540,10 @@ sub build_cohort_tally {
             next if $alt =~ /,/;                    # pre-split; skip residual multiallelic
             my ($gt) = parse_call($fmt,$smp);
             my $z = zygosity($gt);
-            next unless $z eq "het" || $z eq "hom";
+            next unless $z eq "het" || $z eq "hom" || $z eq "hem";
             my $id = "$chr-$pos-$ref-$alt";
             $ac{$id}++;
-            $z eq "hom" ? $hom{$id}++ : $het{$id}++;
+            zyg_biallelic($z) ? $hom{$id}++ : $het{$id}++;
         }
         close $fh;
     }
@@ -475,6 +558,7 @@ sub cohort_artifact_call {
     return 0 unless defined $n && $n >= $COHORT_MIN;
     $carriers  ||= 0;
     $gnomad_ac ||= 0;
+    return 0 if $carriers < $COHORT_MIN_CARRIERS;         # absolute floor (small batches)
     return (($carriers / $n) >= $COHORT_MAX_FRAC && $gnomad_ac <= 0) ? 1 : 0;
 }
 
@@ -518,12 +602,23 @@ sub clinvar_stars {
 # A gene is "recessive-capable" if its MOI mentions AR/XLR/recessive, and
 # "dominant-capable" if it mentions AD/XLD/dominant. Dual-inheritance genes
 # (e.g. "AD, AR") satisfy BOTH — handled explicitly by the callers.
-sub moi_recessive { my $m = shift; return (defined $m && $m =~ /\bAR\b|XLR|recessiv/i) ? 1 : 0; }
-sub moi_dominant  { my $m = shift; return (defined $m && $m =~ /\bAD\b|XLD|dominant/i)  ? 1 : 0; }
+#
+# PLAIN "XL" satisfies BOTH, deliberately. It is the Genes4Epilepsy vocabulary for
+# an X-linked gene whose mechanism is not split into XLD/XLR — 72 of the 1078 g4e-2026
+# genes, including CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX, SLC6A8 and FLNA.
+# Matching neither predicate (the previous behaviour) was an oversight, not a policy:
+# those genes got no HOM/CompHet flag, never qualified for the AR_hom rescue, and were
+# held to the strict dominant AF ceiling. Treating XL as dual-inheritance is the
+# clinically safe reading — dominant-capable keeps a solitary het (these genes act
+# dominantly in heterozygous females), recessive-capable earns a hemizygous/homozygous
+# call its HEM/HOM flag and the AR_hom rescue. Same rule the "AD, AR" genes use.
+# "XLR"/"XLD" keep their specific meaning: \bXL\b cannot match either.
+sub moi_recessive { my $m = shift; return (defined $m && $m =~ /\bAR\b|XLR|\bXL\b|recessiv/i) ? 1 : 0; }
+sub moi_dominant  { my $m = shift; return (defined $m && $m =~ /\bAD\b|XLD|\bXL\b|dominant/i)  ? 1 : 0; }
 
 # ── Carrier-only tier gate ───────────────────────────────────────────────────
 # Strong-evidence bar for SURFACING a solitary heterozygous carrier of a PURE
-# recessive (AR/XLR) gene instead of dropping it (flagged recessive_flag=carrier-only).
+# recessive (AR/XLR) gene instead of dropping it (flagged flags=carrier-only).
 # Mirrors the ACMG-SF strong gate: ClinVar P/LP (>=1 star) OR LOFTEE HC OR
 # >=2 strong computational predictors (AM/CADD/EVE/REVEL). Takes a row data hashref.
 sub carrier_strong_evidence {
@@ -652,13 +747,23 @@ sub acmg_classify {
     my (@P,@B);
 
     # Pathogenic criteria
-    push @P, "PVS1" if $v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC");
+    my $pvs1 = ($v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC")) ? 1 : 0;
+    push @P, "PVS1" if $pvs1;
     if ($v{inh} eq "DN") {                        # trio de novo (relatedness assumed)
         push @P, ($v{gt_clean} ? "PS2" : "PM6");
     } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P, "PM6"; }
-    push @P, "PM4" if $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
+    # PM4 is evidence for a protein-length change; PVS1 already covers the loss-of-
+    # function reading of the same event. VEP compound terms make them collide
+    # (start_lost&inframe_deletion, frameshift_variant&stop_lost) because $lof_type is
+    # matched per '&'-atom while this regex matches the whole string — two ACMG lines
+    # from one protein-terminus effect, which pushes an LP call to Pathogenic.
+    push @P, "PM4" if !$pvs1 && $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
     push @P, "PM2" if $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;       # absent or singleton
-    push @P, "PP5" if clinvar_pathogenic($v{clnsig});
+    # PP5 requires >=1 review star, like every other ClinVar consumer in this file
+    # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6). Without the gate a single
+    # 0-star "no assertion criteria provided" submission — ~16% of the P/LP corpus —
+    # supplied the criterion that lifts an LP call to Pathogenic.
+    push @P, "PP5" if clinvar_pathogenic($v{clnsig}) && ($v{clnstar} // 0) >= 1;
     # PS1 (same AA change P/LP) or PM5 (different change, same residue P/LP), from
     # the ClinVar AA resource; conflicting matches are tagged but still counted (triage).
     push @P, $v{aa_crit} . ($v{aa_conflict} ? "(conflicting)" : "") if $v{aa_crit};
@@ -809,8 +914,8 @@ sub resolve_variant {
         return ($chrom, $f[1], uc $f[2], uc $f[3]);
     }
     # chr-start-end-ref-alt (5 fields) — .candidatos column order; POS = start,
-    # END ignored (it's start+len(REF)-1). bcftools norm in vep_annotate.sh
-    # left-aligns, so a VCF-style anchored REF/ALT is what's expected here.
+    # END ignored (it's start+len(REF)-1). vep_annotate.sh left-aligns with
+    # `bcftools norm -f`, so a VCF-style anchored REF/ALT is what's expected here.
     if (@f == 5 && $f[1] =~ /^\d+$/ && $f[2] =~ /^\d+$/
         && $f[3] =~ /^[ACGTNacgtn]+$/ && $f[4] =~ /^[ACGTNacgtn*]+$/) {
         my $chrom = ($f[0] =~ /^chr/i) ? $f[0] : "chr$f[0]";
@@ -882,7 +987,7 @@ sub build_and_annotate_lookup {
     my $ann = "Lookup.$tag.germline.vep.vcf.gz";
 
     printf "[lookup] %d variant(s) -> sites-only VCF; annotating via vep_annotate.sh (this can take a few minutes) ...\n", scalar @ids;
-    my $rc = system("bash vep_annotate.sh '$raw' '$ann' > '$work/annotate.log' 2>&1");
+    my $rc = system("bash '$CF_REPO/vep_annotate.sh' '$raw' '$ann' > '$work/annotate.log' 2>&1");
     if ($rc != 0) {
         system("tail -25 '$work/annotate.log' 1>&2");
         die "[lookup] annotation failed (see vep_annotate.sh output above)\n";
@@ -940,7 +1045,7 @@ sub run_pangolin_lookup {
         system("tail -12 '$work/pangolin.log' 1>&2");
         return 0;
     }
-    if (system("perl parse_pangolin.pl '$out.csv' > '$tsv' 2>'$work/parse.log'") != 0) {
+    if (system("perl '$CF_REPO/parse_pangolin.pl' '$out.csv' > '$tsv' 2>'$work/parse.log'") != 0) {
         warn "[lookup] parse_pangolin.pl failed (pangolin_score stays blank)\n";
         unlink $tsv;
         return 0;
@@ -1060,7 +1165,15 @@ sub run_cohort_selftest {
     $is->(cohort_artifact_call($ac->{"chr3-300-G-A"}, $n, 0),    0, "REAL kept (not recurrent)");
     $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 1),    0, "recurrent but AC=1 in gnomAD -> kept (founder-safe)");
     $is->(cohort_artifact_call($ac->{"chr1-100-A-G"}, $n, 800),  0, "recurrent but common in gnomAD -> kept");
-    $is->(cohort_artifact_call(6, 8, 0),                         0, "small cohort (N<min) -> filter off");
+    $is->(cohort_artifact_call(3, 4, 0),                         0, "small cohort (N<min) -> filter off");
+    # The absolute carrier floor is what protects small batches: at N=8 the 25% fraction
+    # alone would drop a 2-carrier variant, which is an ordinary shared/founder allele.
+    $is->(cohort_artifact_call(2, 8, 0),                         0, "2 of 8 carriers -> below floor, kept");
+    $is->(cohort_artifact_call(3, 8, 0),                         1, "3 of 8 carriers -> at floor, dropped");
+    $is->(cohort_artifact_call(8, 8, 0),                         1, "8 of 8 carriers -> dropped");
+    # ...and the fraction is what protects large cohorts, where 3 carriers is noise.
+    $is->(cohort_artifact_call(3, 56, 0),                        0, "3 of 56 carriers -> below fraction, kept");
+    $is->(cohort_artifact_call(14, 56, 0),                       1, "14 of 56 carriers -> dropped");
     system("rm","-rf",$dir);
 
     my $fail = grep { !$_ } @ok;
@@ -1148,7 +1261,7 @@ my @COLS = qw(
     loftee
     gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
     zygosity GT DP GQ AB GT_SOURCE NCALLERS CONF
-    inheritance recessive_flag kept_by acmg_class acmg_criteria qc_flag
+    inheritance kept_by acmg_class acmg_criteria flags
     Association MOI GDV
 );
 
@@ -1159,6 +1272,11 @@ my @COLS = qw(
 my ($cohort_ac,$cohort_hom,$cohort_het,$cohort_n) = ({},{},{},0);
 my $cohort_on    = 0;
 my $cohort_built = 0;
+
+# Every final-pass candidate row from every proband, each prefixed with its sample id.
+# Written once, after the loop, as batch.<panel>.candidatos — one file to open when the
+# question is "what did this batch turn up" rather than "what did this patient turn up".
+my @batch_rows;
 
 #############################################################################
 # Process each proband
@@ -1182,20 +1300,26 @@ foreach my $proband (@probands) {
     #    forced/single proband (--proband), and for runs of < $COHORT_MIN probands. ──
     if ($final && !$LOOKUP && !$cohort_built) {
         $cohort_built = 1;
-        my $eligible = (!@force_probands && @probands >= $COHORT_MIN && @files >= $COHORT_MIN);
+        # Eligibility is counted in SAMPLES, the same unit as the denominator, so the
+        # acting threshold matches the one documented. (Counting probands for
+        # eligibility while dividing by all VCFs silently diluted the fraction ~3x on
+        # trio cohorts: an artifact in 4 of 10 probands scored 4/30 = 13%, under the
+        # 25% bar.) Parents belong in the tally — a mapping artifact is a property of
+        # the assay, not of affected status, so every extra sample sharpens it.
+        my $eligible = (!@force_probands && @probands >= 2 && @files >= $COHORT_MIN);
         if ($eligible) {
             ($cohort_ac,$cohort_hom,$cohort_het,$cohort_n) = build_cohort_tally(\@files);
             $cohort_on = ($cohort_n >= $COHORT_MIN) ? 1 : 0;
         }
         if ($cohort_on) {
-            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d%% of cohort AND absent from gnomAD (AC=0)%s\n",
-                   $cohort_n, int($COHORT_MAX_FRAC*100 + 0.5),
+            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d samples AND >=%d%% of cohort AND absent from gnomAD (AC=0)%s\n",
+                   $cohort_n, $COHORT_MIN_CARRIERS, int($COHORT_MAX_FRAC*100 + 0.5),
                    $KEEP_COHORT_ARTIFACTS ? " (keep+tag mode)" : "";
         } else {
             printf "cohort artifact filter: OFF — %s\n",
                    (@force_probands ? "forced/single proband (--proband)"
-                    : @probands < $COHORT_MIN ? "only ".scalar(@probands)." proband(s); need >=$COHORT_MIN"
-                    : "cohort too small");
+                    : @probands < 2 ? "single proband"
+                    : "only ".scalar(@files)." sample(s); need >=$COHORT_MIN");
         }
     }
 
@@ -1437,9 +1561,14 @@ foreach my $proband (@probands) {
                 # variants (those go through the Pangolin splice arm; truncating LoF through the LoF arm);
                 # AB>0.75 guards against false-hom calls. Already rare (AR freq gate), MANE, in-panel by
                 # this point. BS1/BS2/BA1 flags still annotate benign-leaning ones for the curator.
-                push @kept, "AR_hom"   if moi_recessive($p_moi) && $zyg eq "hom"
+                # "hem" qualifies on the same rationale: a hemizygous male call in an
+                # X-linked recessive gene is the complete genotype, so it is the exact
+                # situation the arm exists for. Tagged AR_hem so the curator can see
+                # which genotype produced the rescue.
+                push @kept, ($zyg eq "hem" ? "AR_hem" : "AR_hom")
+                                       if moi_recessive($p_moi) && zyg_biallelic($zyg)
                                           && $consequence =~ /missense|inframe|stop_lost|start_lost|protein_altering/
-                                          && $ab ne "" && $ab > 0.75;   # clean hom call (guards against false-hom/artifact; AB~1.0 expected)
+                                          && $ab ne "" && $ab > 0.75;   # clean hom/hem call (guards against false-hom/artifact; AB~1.0 expected)
                 if (@kept) { $class = "primary"; ($assoc,$moi,$gdv) = ($p_assoc,$p_moi,$p_gdv); }
             }
 
@@ -1528,7 +1657,7 @@ foreach my $proband (@probands) {
             push @qc, "lowGQ"  if $gq ne "" && $gq < $QC_MIN_GQ;
             if ($ab ne "") {
                 push @qc, "AB_het" if $zyg eq "het" && ($ab < 0.25 || $ab > 0.75);
-                push @qc, "AB_hom" if $zyg eq "hom" && $ab < 0.85;
+                push @qc, "AB_hom" if zyg_biallelic($zyg) && $ab < 0.85;   # hom or hemizygous
             }
             push @qc, "homopolymer"   if homopolymer_context($chr,$start,$ref,$alt);
             push @qc, "GT_rescued"    if $gtsrc ne "" && $gtsrc ne "deepvariant";  # borrowed (non-DV) genotype, no VAF
@@ -1539,7 +1668,7 @@ foreach my $proband (@probands) {
             # ── [#11] Cohort recurrent-artifact filter (internal panel-of-normals) ──
             # Drop a candidate that is BOTH cohort-recurrent AND gnomAD-absent (a
             # systematic technical artifact; a founder allele would have a gnomAD
-            # footprint). --keep-cohort-artifacts keeps it, tagged qc_flag instead.
+            # footprint). --keep-cohort-artifacts keeps it, tagged in `flags` instead.
             if ($cohort_on) {
                 my $cac = $cohort_ac->{$my_id} // 0;
                 if (cohort_artifact_call($cac, $cohort_n, $g_ac)) {
@@ -1566,9 +1695,21 @@ foreach my $proband (@probands) {
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
                 ac=>$g_ac, inh=>$inheritance, gt_clean=>(!$gt_susp),
-                aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, BP6 star-gate
-                mis_oe=>$mis_oe{$gene},                                       # PP2 (missense constraint)
+                aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, PP5/BP6 star-gate
+                mis_oe=>mis_oe_for($gene),                                    # PP2 (missense constraint)
                 de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
+
+            # A pathogenic-leaning auto-class that carries a hard benign line (ClinVar
+            # B/LB >=1 star, or a frequency/homozygote criterion) is a contradiction the
+            # combining rules cannot express: "Conflicting" needs BOTH sides to reach a
+            # 2-tier threshold independently, so one benign criterion never blocks a
+            # pathogenic call and the row reaches the curator looking clean. This is a
+            # triage tool, so the class is left alone and the tension is made visible
+            # instead. BP4 is excluded on purpose — a computational prediction
+            # disagreeing with PVS1/PM2 is routine, not a contradiction.
+            push @qc, "clinvar_conflict"
+                if $acmg_class =~ /athogenic/ && $acmg_crit =~ /(?:^|,)(BP6|BS1|BS2|BA1)(?:,|$)/;
+            $qc_flag = join(";", @qc);
 
             # Combined HGVS: TRANSCRIPT:c.… (p.…)  [protein accession stripped from HGVSp].
             my $hgvs = $hgvsc;
@@ -1587,7 +1728,7 @@ foreach my $proband (@probands) {
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
-                class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar,
+                class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar, qc=>$qc_flag,
                 transcript=>$transcript, mane_select=>(field(\@r,$i{mane_select}) ne "" ? 1 : 0),
                 data=>{
                     # END spans the REF allele (start + len(REF) - 1), so an indel reports
@@ -1606,8 +1747,8 @@ foreach my $proband (@probands) {
                     gnomAD_nhomalt=>$g_nhom, gnomAD_filter=>$g_filter,
                     zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
                     GT_SOURCE=>$gtsrc, NCALLERS=>$ncallers, CONF=>$conf,
-                    inheritance=>$inheritance, recessive_flag=>"", kept_by=>$kept_by,
-                    acmg_class=>$acmg_class, acmg_criteria=>$acmg_crit, qc_flag=>$qc_flag,
+                    inheritance=>$inheritance, kept_by=>$kept_by,
+                    acmg_class=>$acmg_class, acmg_criteria=>$acmg_crit, flags=>"",
                     Association=>($assoc//""), MOI=>$moi, GDV=>($gdv//""),
                 },
             };
@@ -1645,8 +1786,16 @@ foreach my $proband (@probands) {
                         $row->{mane_select} ? 1 : 0,
                         $arms,
                         -length($row->{transcript} // "") ];
-            my $cur = $best{$row->{vid}};
-            $best{$row->{vid}} = { row=>$row, key=>$key }
+            # Keyed per (variant, GENE), not per variant. Keying on coordinates alone
+            # collapsed across overlapping MANE gene models — MYH11+NDE1, HPDL+MUTYH,
+            # COL4A1+COL4A2 all co-locate in a real exome — so a panel candidate could
+            # silently delete a reportable ACMG-SF incidental at the same position, and
+            # the surviving row's gene reassignment corrupted the other gene's comp-het
+            # tally. The MANE Select / MANE Plus Clinical duplication this collapse
+            # exists to remove is per-gene, so per-gene is the right unit.
+            my $gkey = $row->{vid} . "\t" . ($row->{gene} // "");
+            my $cur = $best{$gkey};
+            $best{$gkey} = { row=>$row, key=>$key }
                 if !$cur || _key_gt($key, $cur->{key});
         }
         # Restore a deterministic, genomically-sorted order (hash collapse loses it).
@@ -1671,10 +1820,13 @@ foreach my $proband (@probands) {
         next unless $gene_rec{$g};
         my @vids = keys %{$gene_var{$g}};
         my $hom  = grep { $gene_var{$g}{$_}{zyg} eq "hom" } @vids;
+        my $hem  = grep { $gene_var{$g}{$_}{zyg} eq "hem" } @vids;
         my @het  = grep { $gene_var{$g}{$_}{zyg} eq "het" } @vids;
         my $flag = "";
         if ($hom) {
             $flag = "HOM";                                  # homozygous → recessive
+        } elsif ($hem) {
+            $flag = "HEM";                                  # hemizygous → complete genotype
         } elsif (@het >= 2) {
             my $mat = grep {  $gene_var{$g}{$_}{mat} && !$gene_var{$g}{$_}{pat} } @het;
             my $pat = grep { !$gene_var{$g}{$_}{mat} &&  $gene_var{$g}{$_}{pat} } @het;
@@ -1690,12 +1842,12 @@ foreach my $proband (@probands) {
     # (CompHet flag) and every such row is kept regardless. OPT-IN --keep-ar-carriers /
     # KEEP_AR_CARRIERS=1 instead SURFACES the strong solitary carriers (the carrier-only
     # tier: kept iff strong-evidence — ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors
-    # — AND not Benign/LB; flagged recessive_flag=carrier-only), for a targeted second-hit
+    # — AND not Benign/LB; flagged flags=carrier-only), for a targeted second-hit
     # hunt (a deep-intronic / CNV partner the exome may have missed). Dual AD/AR genes are
     # NOT rec_ar (see [#5]), so their solitary hets pass through as dominant candidates.
     unless ($LOOKUP) {
         @rows = grep {
-            my $biallelic = ($_->{zyg} eq "hom" || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
+            my $biallelic = (zyg_biallelic($_->{zyg}) || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
             my $solitary_carrier = ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic;
             !$solitary_carrier      ? 1                       # non-carrier or biallelic: keep
               : !$KEEP_AR_CARRIERS  ? 0                       # DEFAULT: drop solitary carriers
@@ -1711,17 +1863,26 @@ foreach my $proband (@probands) {
     # the het rows that constitute it.
     for my $row (@rows) {
         my $gf = $gene_flag{$row->{gene}} // "";
-        my $biallelic = ($row->{zyg} eq "hom" || $gf =~ /CompHet/);
+        my $biallelic = (zyg_biallelic($row->{zyg}) || $gf =~ /CompHet/);
         # $gf is populated for recessive-capable genes ONLY, so testing it here keeps
         # the existing invariant that a purely dominant gene never carries a recessive
         # flag, while the zygosity test keeps the label true of THIS row.
-        my $own = ($gf eq "HOM"    && $row->{zyg} eq "hom") ? "HOM"
+        my $own = ($gf eq "HOM"     && $row->{zyg} eq "hom") ? "HOM"
+                : ($gf eq "HEM"     && $row->{zyg} eq "hem") ? "HEM"
                 : ($gf =~ /CompHet/ && $row->{zyg} eq "het") ? $gf
                 :                                              "";
-        $row->{data}{recessive_flag} =
+        $row->{rec_label} =
             $own ne ""                                           ? $own
           : (($row->{sf_ar} || $row->{rec_ar}) && !$biallelic)   ? "carrier-only"
           :                                                        "";
+        # ── Single consolidated `flags` column ──
+        # The recessive verdict and the QC/artifact flags used to occupy two separate
+        # columns 4 apart in a 43-column table, so a curator scanning left to right met
+        # the interpretive flag and the technical one at different times. They are one
+        # answer to one question — "is there anything about this row you should know
+        # before reading it?" — so they are one column, recessive verdict first.
+        $row->{data}{flags} = join(";", grep { defined && $_ ne "" }
+                                        ($row->{rec_label}, $row->{qc}));
     }
 
     # ── Write output ──
@@ -1761,6 +1922,9 @@ foreach my $proband (@probands) {
         print OUT join("\t", @COLS), "\n";
         for my $row (@rows) {
             print OUT join("\t", map { $row->{data}{$_} // "" } @COLS), "\n";
+            # Same row, prefixed with the sample it came from, for the batch table
+            # written once after every proband is done.
+            push @batch_rows, join("\t", $proband, map { $row->{data}{$_} // "" } @COLS);
         }
         close OUT;
 
@@ -1771,11 +1935,14 @@ foreach my $proband (@probands) {
             $row->{class} eq "incidental" ? $n_inc++ : $n_prim++;
             $by_arm{$_}++ for split /;/, $row->{data}{kept_by};
             $by_inh{$row->{data}{inheritance}}++;
-            $by_flag{$row->{data}{recessive_flag}}++ if $row->{data}{recessive_flag} ne "";
+            $by_flag{$row->{rec_label}}++ if ($row->{rec_label} // "") ne "";
         }
         print  "  -> $proband.$PANEL_TAG.candidatos\n";
+        # structural-pass is reported as UNIQUE VARIANTS (keys %emit), matching what the
+        # EMIT pass prints. $stat{structural} increments per CSQ annotation, so a variant
+        # on two MANE transcripts counted twice and the two passes disagreed on identical input.
         printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
-               $stat{lines}, $stat{multiallelic}, $stat{structural}, $n_prim, $n_inc;
+               $stat{lines}, $stat{multiallelic}, scalar(keys %emit), $n_prim, $n_inc;
         printf "  cohort_artifact: %d variant(s) dropped (recurrent in >=%d%% of cohort & gnomAD-absent)\n",
                $stat{cohort_dropped}, int($COHORT_MAX_FRAC*100 + 0.5)
             if $cohort_on && !$KEEP_COHORT_ARTIFACTS && $stat{cohort_dropped};
@@ -1783,6 +1950,20 @@ foreach my $proband (@probands) {
         print  "  inheritance: ", join(", ", map { "$_=$by_inh{$_}" } sort keys %by_inh), "\n" if %by_inh;
         print  "  recessive:   ", join(", ", map { "$_=$by_flag{$_}" } sort keys %by_flag), "\n" if %by_flag;
     }
+}
+
+# ── Batch-level table: every proband's candidates in one file ──
+# Written only for a normal (non-consult) run that actually produced final-pass rows.
+# Column 1 is the sample; the remaining columns are exactly the per-proband table, so
+# the two stay diffable and anything that reads one can read the other.
+if (!$LOOKUP && @batch_rows) {
+    my $bf = "batch.$PANEL_TAG.candidatos";
+    open my $bfh, ">", $bf or die "$bf: $!";
+    print $bfh join("\t", "sample", @COLS), "\n";
+    print $bfh "$_\n" for @batch_rows;
+    close $bfh;
+    printf "\n-> %s (%d candidate rows across %d proband(s))\n",
+           $bf, scalar(@batch_rows), scalar(@probands);
 }
 
 # ── Variant-mode cleanup: drop the annotated lookup VCF, splice scratch + tmp dir ──

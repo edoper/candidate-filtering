@@ -20,8 +20,9 @@ set -euo pipefail
 # Working directory holds the *.germline.vep.vcf.gz data + reference files
 # (defaults to this script's own directory; override with $WORKDIR).
 GENES="${1:-}"
-_CF_SITE="$(dirname "$(readlink -f "$0")")/site.sh"   # resolve before cd
-cd "${WORKDIR:-$(dirname "$(readlink -f "$0")")}"
+_CF_DIR="$(dirname "$(readlink -f "$0")")"            # resolve before cd
+_CF_SITE="$_CF_DIR/site.sh"
+cd "${WORKDIR:-$_CF_DIR}"
 
 # Optional: force specific sample(s) as proband, overriding filename-based
 # auto-discovery.  e.g.  PROBAND="EPIC280-M" bash run_filtering.sh
@@ -43,7 +44,7 @@ FA="$PANGOLIN_FASTA"
 DB="$PANGOLIN_DB"
 
 echo "===== Pass 1: emit Pangolin candidate inputs ====="
-perl filtering_r.pl "${FWD[@]}"
+perl "$_CF_DIR/filtering_r.pl" "${FWD[@]}"
 
 echo "===== Pangolin scoring ====="
 shopt -s nullglob
@@ -52,12 +53,26 @@ for csv in *.pangolin_input.csv; do
     tsv="$proband.pangolin.tsv"
     echo "[pangolin] scoring $proband ($(($(wc -l < "$csv") - 1)) variants) ..."
     pangolin "$csv" "$FA" "$DB" "$proband.pangolin" -c CHROM,POS,REF,ALT
-    perl parse_pangolin.pl "$proband.pangolin.csv" > "$tsv"
-    echo "[pangolin] -> $tsv ($(wc -l < "$tsv") variants scored)"
+    perl "$_CF_DIR/parse_pangolin.pl" "$proband.pangolin.csv" > "$tsv"
+    scored="$(wc -l < "$tsv")"
+    echo "[pangolin] -> $tsv ($scored variants scored)"
+    # An empty score map must NOT survive into pass 2. filtering_r.pl switches to its
+    # final pass on the mere EXISTENCE of this file, so a Pangolin run that exits 0 but
+    # scores nothing (missing GPU, bad refs, empty parse) would produce a complete,
+    # successful-looking candidatos table with every pangolin_score blank — the splice
+    # rescue arm silently dead and BP7 never firing — and cleanup would then delete the
+    # evidence. Remove the stub and fail loudly instead.
+    if [ "$scored" -eq 0 ] && [ "$(wc -l < "$csv")" -gt 1 ]; then
+        rm -f -- "$tsv"
+        echo "[pangolin] FATAL: 0 of $(( $(wc -l < "$csv") - 1 )) variants scored for $proband." >&2
+        echo "[pangolin]        Removed the empty $tsv so the next run re-scores instead of" >&2
+        echo "[pangolin]        silently reporting without splice evidence. Check the GPU/env/refs." >&2
+        exit 1
+    fi
 done
 
 echo "===== Pass 2: final filtering with splice scores ====="
-perl filtering_r.pl "${FWD[@]}"
+perl "$_CF_DIR/filtering_r.pl" "${FWD[@]}"
 
 # Keep only the final tables + annotated VCFs; drop all regenerable Pangolin
 # scratch. Runs only on success (set -e aborts earlier), so a failed run leaves

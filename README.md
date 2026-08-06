@@ -77,8 +77,14 @@ You can **override** which sample is the proband (see [Forcing a proband](#forci
 bash vep_annotate.sh <input.vcf[.gz]> <output.germline.vep.vcf.gz>
 ```
 
-- Splits multiallelic sites (`bcftools norm -m-any`) so downstream `chr-pos-ref-alt`
-  keys are unambiguous.
+- Splits multiallelic sites **and left-aligns** (`bcftools norm -m-any -f $REF_FASTA`) so downstream
+  `chr-pos-ref-alt` keys are unambiguous **and minimal**. Left-alignment is not cosmetic: both custom
+  sources below join with `type=exact`, which matches on position *and* allele, and both store indels
+  minimally. Splitting without `-f` leaves the split alleles in the parent record's padded
+  representation (`chr1 100 AT ATT,A` → `AT>ATT`, where gnomAD holds the same allele at 101 as
+  `T>TT`), so the join silently misses — the variant then reports `AC=0`, which this pipeline reads as
+  *absent from gnomAD*, and collects a spurious **PM2**. Indels were affected ~1.6× as often as SNVs
+  before this was fixed. The script warns loudly and falls back to split-only if `REF_FASTA` is unset.
 - Ensembl VEP (offline cache, GRCh38) with plugins **LOFTEE, REVEL, AlphaMissense, EVE,
   CADD**, `--mane_select`, HGVS, etc.
 - `--custom` **gnomAD v4.1 joint** → `gnomADmin_AC_joint / AN_joint / AF_joint /
@@ -94,9 +100,13 @@ name** from the CSQ header (no hard-coded column indices).
 ## The filtering algorithm (`filtering_r.pl`)
 
 Logic runs **per transcript annotation** of each variant, then collapses to **one MANE
-row per variant** (a variant hitting >1 MANE transcript — MANE Select + MANE Plus Clinical,
-or overlapping gene models — keeps a single row: panel-primary first, then MANE Select, then
-the most evidence arms). `--lookup` consults still report every annotation.
+row per variant *per gene*** (a variant hitting >1 MANE transcript of the **same** gene — MANE Select
++ MANE Plus Clinical — keeps a single row: panel-primary first, then MANE Select, then the most
+evidence arms). The collapse is keyed on **(variant, gene)**, not on coordinates alone: overlapping
+MANE gene models are common (MYH11+NDE1, HPDL+MUTYH, COL4A1+COL4A2, SETD1A+STX1B), and keying on
+position let a panel candidate silently delete a reportable **ACMG-SF incidental** at the same
+position — and corrupted the other gene's comp-het tally by reassigning the row's gene.
+`--lookup` consults still report every annotation.
 
 ### Stage 1 — Structural gates (ALL required, AND)
 
@@ -135,27 +145,38 @@ the arm's prose name.
 | ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
-| AR_hom | `AR_hom` | **Homozygous, protein-altering** (`missense` / `inframe_*` / `stop_lost` / `start_lost` / `protein_altering_variant`) variant in a gene whose panel **MOI contains AR or XLR** — this includes dual `AD, AR` genes, unlike the *pure*-recessive carrier logic below — with clean allele balance (**AB > 0.75**). Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
+| AR_hom / AR_hem | `AR_hom` / `AR_hem` | **Homozygous or hemizygous, protein-altering** (`missense` / `inframe_*` / `stop_lost` / `start_lost` / `protein_altering_variant`) variant in a gene whose panel **MOI contains AR or XLR** — this includes dual `AD, AR` genes, unlike the *pure*-recessive carrier logic below — with clean allele balance (**AB > 0.75**). A **hemizygous** male call on non-PAR chrX qualifies on the same rationale and is tagged `AR_hem`. Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous/hemizygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
 All thresholds are single constants at the top of `filtering_r.pl`.
 
 ### Genotype-aware annotation (not gates)
 
 - **Zygosity / GT / DP / GQ / AB** are read from the proband `FORMAT`/sample column.
+  **Haploid genotypes** (`GT=1`, emitted by DRAGEN for non-PAR chrX/chrY in males and for chrM)
+  report `zygosity=hem` and are treated as **biallelic-equivalent**: a hemizygous call is a complete
+  genotype, not half a het. It earns the `HEM` flag and the `AR_hem` rescue arm, gets the `AB_hom` QC
+  check, and is never dropped as a carrier. A **hemizygous parent counts as a carrier**, so an
+  inherited X-linked variant is not misreported as de novo.
 - **Inheritance** uses *parental genotype* (carrier = non-ref GT, not mere site presence):
   `IB / IM / IF / DN` in a full trio; duo-ambiguous `DN/IF` (mother-only) or `DN/IM`
   (father-only); `NA` for a singleton.
-- **`recessive_flag`** — the recessive picture is worked out **per gene** (for **recessive-capable
+- **`flags`** — one `;`-separated column carrying the recessive verdict **first**, then the QC /
+  artifact warnings (they used to be two columns, `recessive_flag` and `qc_flag`, four columns apart).
+- **The recessive verdict** — the recessive picture is worked out **per gene** (for **recessive-capable
   genes only** — AR/XLR/dual; a purely dominant gene never gets one, so two independent hets are not
   mislabeled comp-het), but the label written to each row **describes that row**: `HOM` on a
-  homozygous row, `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio only) or
+  homozygous row, `HEM` on a hemizygous row, `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio only) or
   `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton) on the heterozygous rows that constitute it,
   or `carrier-only` (see below). A heterozygous variant sitting in a gene that is homozygous for some
   *other* variant is therefore left blank rather than labelled `HOM` — the flag never contradicts the
   row's own `zygosity`. The gene-level verdict still governs which rows survive the carrier drop.
-- **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`) are treated as
-  **dominant** for the carrier logic: a **solitary het passes through as a normal candidate**
-  (`recessive_flag` empty), while a genuine `HOM`/comp-het still gets the recessive flag. This
+- **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`, **and plain `XL`**)
+  are treated as **dominant** for the carrier logic: a **solitary het passes through as a normal
+  candidate** (no recessive flag), while a genuine `HOM`/`HEM`/comp-het still gets the recessive flag.
+  Plain `XL` is the Genes4Epilepsy vocabulary for an X-linked gene with no XLD/XLR split — **72 of the
+  1078** g4e-2026 genes, including CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX, SLC6A8 and FLNA.
+  Before 2026-08 it matched *neither* MOI predicate, so those genes silently got no HOM/CompHet flag,
+  no `AR_hom` rescue, and the strict dominant AF ceiling. `XLR` / `XLD` keep their specific meanings. This
   prevents dropping a dominant-acting variant (e.g. a LoF) just because the gene *also* has a
   recessive mechanism. Only **pure** AR/XLR genes use the carrier path below.
 - **Recessive carrier drop (default):** in a **pure** recessive (AR/XLR) panel gene, a **solitary het**
@@ -168,20 +189,21 @@ All thresholds are single constants at the top of `filtering_r.pl`.
     hunt: it **surfaces the strong** solitary AR/XLR carriers — the **carrier-only tier**, kept only if
     they clear a strong-evidence bar (ClinVar P/LP ≥1★, LOFTEE-HC, or ≥2 strong predictors: AM ≥ 0.906,
     CADD ≥ 28.1, EVE pathogenic, REVEL ≥ 0.773) **and** are not Benign/Likely-benign — flagged
-    `recessive_flag=carrier-only`. Use it when you suspect the exome missed a second allele (deep-intronic,
+    `flags=carrier-only`. Use it when you suspect the exome missed a second allele (deep-intronic,
     CNV, regulatory) in a specific gene/case.
     ⚠️ A **common** SNP (high gnomAD AF) is not a valid second hit — an apparent "comp-het" of one rare
     plus one common variant is really a **solitary carrier** of the rare allele, not a biallelic genotype.
 
 ### Stage 3 — Cohort recurrent-artifact filter (internal panel-of-normals)
 
-When a **real cohort** is auto-analyzed together (≥ `$COHORT_MIN` = 10 probands), the pipeline
+When a **real cohort** is auto-analyzed together (≥ `$COHORT_MIN` = **5 samples**, ≥2 probands), the pipeline
 builds an internal *panel of normals*: a one-pass genotype tally (no CSQ, so it is cheap) over all
 input samples counting, per `chr-pos-ref-alt`, how many carry the ALT and their zygosity breakdown.
 A candidate is then **dropped** when it is **both**:
 
-1. **cohort-recurrent** — carried by ≥ `$COHORT_MAX_FRAC` (25%) of the cohort, and
-2. **gnomAD-absent** — gnomAD joint **AC = 0**, i.e. the allele is wholly unobserved.
+1. **carried by ≥ `$COHORT_MIN_CARRIERS` (3) samples** — an absolute floor, and
+2. **cohort-recurrent** — carried by ≥ `$COHORT_MAX_FRAC` (25%) of the cohort, and
+3. **gnomAD-absent** — gnomAD joint **AC = 0**, i.e. the allele is wholly unobserved.
 
 This targets systematic technical artifacts — reference/mapping errors in paralog-rich or
 low-complexity genes (e.g. the recurrent `SYNE1` / `KMT2C` sites that appear, gnomAD-absent, in a
@@ -194,17 +216,35 @@ ceiling, because a ceiling anywhere near `$FREQ_AD` is already implied by the St
 dominant genes: recurrence would then be the only condition still doing work, and the founder
 protection would be nominal. Requiring a literal zero keeps the second condition meaningful under
 every mode of inheritance — **any** gnomAD observation, even a single allele, spares the variant.
+The **absolute carrier floor** is what makes this safe at real batch sizes. At N=8 the 25% fraction
+alone means *two* carriers, and two unrelated probands sharing a gnomAD-absent allele is an ordinary
+founder/relatedness event, not evidence of a technical artifact. The floor binds on small batches;
+the fraction binds on large cohorts (at N=56, 25% = 14 carriers, well above the floor).
+
 Every drop is logged (`cohort_artifact drop:` lines with carrier count + hom/het breakdown, and a
 per-proband total).
 
+> **Thresholds revised 2026-08.** `$COHORT_MIN` was **10 probands** — a bar no internal batch reaches,
+> since they run 6–9 samples — so the filter had **never fired on a real clinical run**, and the
+> recurrent KMT2C / SYNE1 mismapping artifacts reached every delivered table. Measured on batch4
+> (8 singleton probands) the carrier distribution is cleanly bimodal: the four artifacts sit at 5, 6, 7
+> and 8 of 8 carriers (63–100%), and the next most recurrent candidate is 2 of 8 (25%). Both new
+> thresholds fall inside that gap. Eligibility and the denominator are now both counted in **samples**;
+> previously eligibility counted probands while the denominator counted all VCFs, which diluted the
+> acting fraction ~3× on trio cohorts (an artifact in 4 of 10 probands scored 4/30 = 13%).
+>
+> ⚠️ **The filter only sees the samples in ONE run.** A batch split across per-sample directories has
+> a cohort of 1 and the filter stays off. Put the whole batch's VCFs in one `$WORKDIR`.
+
 - **OFF** for single-variant (`-v` / `--lookup`), forced/single proband (`--proband`), and any run of
-  fewer than `$COHORT_MIN` probands — a per-variant or per-proband consult has no cohort to compare
+  fewer than `$COHORT_MIN` samples — a per-variant or per-proband consult has no cohort to compare
   against.
 - **`--keep-cohort-artifacts`** (or env `KEEP_COHORT_ARTIFACTS=1`) keeps them, tagged
-  `qc_flag=cohort_artifact`, instead of dropping — for a founder-enriched cohort, review the drop log
+  `flags=cohort_artifact`, instead of dropping — for a founder-enriched cohort, review the drop log
   (a genuinely private founder allele would surface there and can be kept this way).
 - Self-test (synthetic cohort, no reference files needed): `perl filtering_r.pl --selftest-cohort`.
-- Thresholds are the `$COHORT_MIN` / `$COHORT_MAX_FRAC` constants at the top of `filtering_r.pl`.
+- Thresholds are the `$COHORT_MIN` / `$COHORT_MAX_FRAC` / `$COHORT_MIN_CARRIERS` constants at the
+  top of `filtering_r.pl`.
 
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
@@ -216,8 +256,12 @@ revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
 clinvar_sig, clinvar_stars, clinvar_disease, clinvar_aa, loftee,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
 zygosity, GT, DP, GQ, AB, GT_SOURCE, NCALLERS, CONF,
-inheritance, recessive_flag, kept_by,
-acmg_class, acmg_criteria, qc_flag, Association, MOI, GDV`
+inheritance, kept_by,
+acmg_class, acmg_criteria, flags, Association, MOI, GDV`
+
+A run also writes **`batch.<panel>.candidatos`** — every proband's rows in one table, prefixed with a
+`sample` column; columns 2..N are byte-identical to the per-proband header, so anything that reads one
+reads the other. Written once, after all probands are processed.
 
 `start`/`end` are 1-based and span the **REF allele** (`end` = `start` + len(`ref`) − 1), so an indel
 reports its full footprint and the row round-trips into the 5-field `chr-start-end-ref-alt` form the
@@ -249,12 +293,12 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
   | **PS2** | De novo **confirmed** in a trio (`inheritance=DN`, clean genotype) | parental GT |
   | **PM2** | Absent or singleton in gnomAD (AC ≤ 1) | gnomAD v4.1 |
-  | **PM4** | Protein length change (in-frame indel / `stop_lost`) | consequence |
+  | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when PVS1 fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect, pushing an LP call to Pathogenic | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
   | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM` **in a gene whose panel MOI contains AD or XL**. A duo-ambiguous call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — never earns PM6 | parental GT + panel MOI |
   | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). Counts **independently of PP3** (both are legitimate separate ACMG lines — gene-level intolerance vs variant-level prediction), but **suppressed when BP4 fires** (a benign-predicted variant gets no gene-level pathogenic support). | gnomAD v4.1.1 constraint |
   | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below) | AlphaMissense / REVEL |
-  | **PP5** | This variant is reported pathogenic in ClinVar | ClinVar |
+  | **PP5** | This variant is reported pathogenic in ClinVar **with ≥1 review star**. The star gate matches every other ClinVar consumer in the pipeline; without it a single 0-star "no assertion criteria provided" submission (~16% of the P/LP corpus) supplied the criterion that lifts LP to Pathogenic | ClinVar |
 
   **Benign**
 
@@ -288,13 +332,22 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   **Not a final clinical call**: PM1 not assessed; PP2 is gene-level constraint only (no domain/hotspot
   reasoning); PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching (no independent
   re-curation; PS1 and PP5 can still co-occur when a *different* variant supplies the amino-acid match).
-- **`qc_flag`** — artifact/confidence warnings: `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
-  `AB_het`/`AB_hom` (skewed allele balance), `homopolymer` (indel in **or adjacent to** a ≥5 bp
+- **QC / artifact components of `flags`:** `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
+  `AB_het`/`AB_hom` (skewed allele balance; `AB_hom` also covers hemizygous calls),
+  `homopolymer` (indel in **or adjacent to** a ≥5 bp
   homopolymer — the reference is scanned ±12 bp around the position, so a nearby run also flags —
   error-prone),
   `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `cohort_artifact` (recurrent
-  gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped).
+  gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped),
+  `clinvar_conflict` (see below).
+- **`clinvar_conflict`** — the auto-class reached Pathogenic/Likely pathogenic **while a hard benign
+  line fired** (`BP6`/`BS1`/`BS2`/`BA1`). The categorical `Conflicting` verdict requires *both* sides to
+  reach a 2-tier threshold independently, so a single benign criterion never blocks a pathogenic call:
+  `PVS1,PM2,BP6` reads as Likely_pathogenic on a variant ClinVar calls **Benign with review stars**,
+  and a curator sorting by `acmg_class` sees a clean LP. This is a triage tool, so the class is left
+  alone and the contradiction is made visible instead. `BP4` is deliberately excluded — a computational
+  prediction disagreeing with PVS1/PM2 is routine, not a contradiction.
 - **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
   sites), so de-novo cannot be confirmed from parental coverage — `DN` rows are flagged
   `DN_unconfirmed`. Inherited rows instead get `inh_lowqual` when the parental call is low quality.
@@ -505,7 +558,7 @@ Every value-taking flag also accepts the `--flag=value` form.
 | `--keep-vcf` | — | Consult mode: keep the annotated VCF instead of deleting it. |
 | `--no-splice` | — | Consult mode: skip the inline Pangolin run. |
 | `--keep-ar-carriers` | — | Surface strong solitary AR/XLR carriers (carrier-only tier) instead of dropping them. |
-| `--keep-cohort-artifacts` | — | Tag cohort recurrent artifacts `qc_flag=cohort_artifact` instead of dropping them. |
+| `--keep-cohort-artifacts` | — | Tag cohort recurrent artifacts `flags=cohort_artifact` instead of dropping them. |
 | `--selftest` | — | Family-discovery self-test; exits. Needs no data. |
 | `--selftest-cohort` | — | Cohort recurrent-artifact self-test; exits. Needs no data. |
 
@@ -678,7 +731,42 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
   `pangolin_score` blank; the splice rescue arm and BP7 both stay silent rather than defaulting either
   way. Synonymous variants therefore remain unclassified on splicing instead of being labelled benign
   on no evidence — use `run_filtering.sh` when that distinction matters.
+- **Known-open triage limitations** (deliberate, not defects — they change *class*, not *coverage*):
+  - **PM2 counts at Moderate.** ClinGen SVI (2020) recommends Supporting for rare disease. At Moderate
+    it is load-bearing: on a 324-row sample of real output, re-scoring PM2 as Supporting moved
+    **60 of 64** Likely_pathogenic calls to VUS — the dominant pattern is `PM2,PP3_Strong` → LP, i.e.
+    gnomAD absence plus one AlphaMissense score. Compounding it, a **missing** gnomAD annotation is
+    coerced to `AC=0`, so PM2 cannot distinguish "gnomAD never saw this allele" from "the exact-match
+    join failed" (the left-alignment fix above removes the largest source of the latter, not all of it).
+  - **PS2 vs PM6.** A trio `DN` earns **PS2** (Strong) when the *proband's* genotype is clean, but the
+    discriminator carries no information about parentage or parental coverage — which is what actually
+    separates PS2 from PM6 — and the same rows are stamped `DN_unconfirmed`. Trios are assumed
+    confirmed; treat PS2 rows as PM6 unless relatedness and parental coverage were verified.
+  - **BA1/BS1 use global joint AF**, not popmax or filtering AF, and have no ClinGen exception list, so
+    a known pathogenic founder allele that survives the Stage-1 ClinVar exemption can auto-classify as
+    Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
 - This is a **triage tool to feed manual curation**, not an automated classifier.
+
+## Changelog — 2026-08
+
+Correctness fixes from a full audit. Everything here changes **which variants reach the curator** or
+**what class they carry**, so tables produced before this point are not comparable.
+
+| Change | Effect |
+|---|---|
+| Plain `XL` MOI now matches both MOI predicates | 72 panel genes (CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX…) had matched *neither*, so they got no HOM/CompHet flag, no `AR_hom` rescue, and the strict dominant AF ceiling |
+| Haploid `GT=1` parsed as `hem` | Male non-PAR chrX/chrY and chrM calls had no zygosity; a **hemizygous parent was invisible**, so inherited X-linked variants were reported de novo (and fed PS2/PM6) |
+| One-MANE-row collapse keyed on (variant, **gene**) | A panel candidate could silently delete a reportable ACMG-SF incidental at the same position |
+| **PP5** requires ≥1 review star | A single 0-star ClinVar submission (~16% of the P/LP corpus) was lifting LP calls to Pathogenic |
+| **PM4** suppressed when PVS1 fired | VEP compound consequence terms yielded two ACMG lines for one protein-terminus effect |
+| `bcftools norm -f` left-alignment | Non-minimal indels missed the gnomAD/ClinVar `type=exact` join → spurious `AC=0` → spurious PM2 |
+| Cohort artifact thresholds (`$COHORT_MIN` 10→5, new `$COHORT_MIN_CARRIERS`=3, samples as the unit) | The filter had **never fired on a real clinical run**; KMT2C/SYNE1 artifacts reached every delivered table |
+| New `clinvar_conflict` flag | Surfaces P/LP auto-classes that carry a hard benign line (e.g. `PVS1,PM2,BP6` on a ClinVar-Benign variant) |
+| `flags` replaces `recessive_flag` + `qc_flag` | One column instead of two, four apart |
+| `batch.<panel>.candidatos` | Batch-level table, `sample` column first |
+| Five HGNC aliases for the constraint file + startup coverage line | PP2 was silently dead for renamed genes (GBA1, BMAL1, AFG2A, AFG2B, BLTP1) |
+| Reference files resolve from the repo dir | `$WORKDIR` now works without symlinking the repo into every run directory |
+| Empty Pangolin score map aborts the run | A silent Pangolin failure produced a complete-looking table with the splice arm dead |
 
 ## Data privacy
 
