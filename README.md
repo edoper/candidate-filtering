@@ -338,7 +338,8 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
   | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype); relatedness is assumed confirmed. Structurally unreachable without both parents — `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT |
-  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), counted at **Supporting** (`PM2_Supporting`) per [ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/), not ACMG 2015's Moderate. See the caveat below | gnomAD v4.1 |
+  | **PM1** | **Missense / in-frame indel** inside a **PERv1** pathogenic-variant-enriched region computed on the **same gene** (§0.6b). Graded by the region's patient-vs-population fold enrichment at the published calibration: **≥ 18.7 → `PM1_Strong`** (counts at Strong), else Moderate. **Gene-wise track only — no paralog transfer.** Unlike PP2 it is **not** suppressed by BP4: the regions are validated independently, against de novo variants held out of their construction. The region that fired it is echoed to `flags` for audit | PERv1 BED (Pérez-Palma 2020) |
+  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), counted at **Moderate** (ACMG 2015). `$PM2_STRENGTH` can switch it to Supporting per [ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/) — see the caveat below before doing so | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when PVS1 fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect, pushing an LP call to Pathogenic | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
   | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM` **in a gene whose panel MOI contains AD or XL**. A duo-ambiguous call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — never earns PM6 | parental GT + panel MOI |
@@ -357,9 +358,13 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **BP6** | This variant is reported benign in ClinVar (≥1★) | ClinVar |
   | **BP7** | Synonymous **and scored** by Pangolin at < 0.2. The score must exist: an unscored variant is unknown, not benign, so BP7 is withheld rather than assumed | Pangolin |
 
-  **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control), PM1
-  (hotspot/domain), PM3 (in trans), PP1/BS4 (segregation), PP4 (phenotype specificity),
-  BP1/BP2/BP3/BP5.
+  **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control),
+  PM3 (in trans), PP1/BS4 (segregation), PP4 (phenotype specificity), BP1/BP2/BP3/BP5.
+
+  **PM1 and PS1/PM5 may both fire at one residue.** PER regional evidence is validated independently
+  of the individual ClinVar submissions behind it, so PM1 is not suppressed — but ClinGen SVI cautions
+  against reusing one piece of evidence twice, so the co-occurrence is surfaced as
+  `flags=PM1_with_ps1` / `PM1_with_pm5` for the curator to rule on rather than being decided silently.
 
   **PS1/PM5** use the ClinVar MANE-missense resource (`clinvar.MANE_missense.{PLP,BLB}.tsv`), matched on
   gene + protein residue + amino-acid change, requiring **≥1 review star**. The resource is indexed by
@@ -375,7 +380,8 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013): PP3 supp ≥0.644 / mod ≥0.773 /
   strong ≥0.932; BP4 supp ≤0.290 / mod ≤0.183 / strong ≤0.016) — with a **REVEL direction-conflict
   veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
-  **Not a final clinical call**: PM1 not assessed; PP2 is gene-level constraint only (no domain/hotspot
+  **Not a final clinical call**: PM1 is regional hotspot evidence, not a curated functional-domain
+  assessment; PP2 is gene-level constraint only (no domain/hotspot
   reasoning); PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching (no independent
   re-curation; PS1 and PP5 can still co-occur when a *different* variant supplies the amino-acid match).
 - **QC / artifact components of `flags`:** `lowDP` (<`$QC_MIN_DP`), `lowGQ` (<`$QC_MIN_GQ`),
@@ -542,6 +548,31 @@ $CLINVAR_AA_DIR/clinvar.MANE_missense.BLB.tsv
 Build them by splitting the ClinVar VCF's MANE missense records by clinical significance, keyed by
 `gene:protein_position`. **If `CLINVAR_AA_DIR` is unset or the files are missing, filtering still
 runs normally and PS1/PM5 are simply skipped** with a warning — so you can defer this.
+
+### 0.6b — PERv1 regions (optional — enables ACMG PM1)
+
+`vep_annotate.sh` adds an optional `--custom` BED track supplying the ACMG **PM1** criterion:
+
+```
+$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz   (+ .tbi)     # override with $PER_BED
+```
+
+These are the published PERs (pathogenic-variant-enriched regions) of Pérez-Palma et al., *Genome
+Research* 2020;30(1):62–71, whose stated application is PM1. Supplemental Table S2 of that paper
+ships them in **GRCh37**; the track used here is rebuilt on GRCh38 by re-deriving each residue's
+position from the MANE backbone (`PERs-v2/scripts/15_perv1_to_bed.pl`), with a reference-amino-acid
+check so residues where the 2019 and present-day MANE transcripts disagree are dropped rather than
+mis-placed. Per-region fold enrichments come from the 2019 run's per-window statistics and set the
+`PM1_Strong` / `PM1_Moderate` grade at the published 18.7 threshold.
+
+Only the **gene-wise** track is wired in. A family-wise (paralog) track exists but is deliberately
+not used: transferring evidence between paralogs is a separate argument that has not been adopted
+here. For the same reason PS1/PM5 remain strictly same-gene.
+
+The BED name field is `/`-delimited, never `|` — it lands inside VEP's pipe-delimited CSQ string, and
+a `|` there would silently shift every downstream field.
+
+Optional: without it the pipeline runs unchanged and PM1 simply never fires.
 
 ### 0.7 — Pangolin splice scoring (optional but recommended)
 
@@ -780,14 +811,15 @@ edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` a
   way. Synonymous variants therefore remain unclassified on splicing instead of being labelled benign
   on no evidence — use `run_filtering.sh` when that distinction matters.
 - **Known-open triage limitations** (deliberate, not defects — they change *class*, not *coverage*):
-  - **PM2 is now Supporting** (`$PM2_STRENGTH`), per ClinGen SVI 2020. ⚠️ **Read this before
-    interpreting classes:** the downgrade interacts badly with *categorical* combining. ACMG 2015
-    has no "PVS1 + 1 supporting" pathway, so a gnomAD-absent nonsense or frameshift variant in a
-    disease gene (`PVS1,PM2_Supporting`) now lands on **VUS**, not Likely pathogenic. Under the
-    ClinGen/Tavtigian **Bayesian points** framework — the framework PM2_Supporting was calibrated
-    in — the same variant scores 8+1 = 9 points and stays Likely pathogenic. The two are not
-    interchangeable, and this pipeline combines categorically. Set `$PM2_STRENGTH = 'moderate'` to
-    restore the 2015 reading. Moving to a points-based combiner is the real fix and is not done.
+  - **PM2 counts at Moderate** (`$PM2_STRENGTH = 'moderate'`), the ACMG 2015 reading. ClinGen SVI
+    (2020) recommends Supporting and the knob implements it, but ⚠️ **do not flip it while the
+    combining step is categorical.** The SVI downgrade is calibrated for the ClinGen/Tavtigian
+    **Bayesian points** framework, where PVS1=8 and PM2_Supporting=1 sum to 9 and still reach Likely
+    pathogenic. ACMG 2015 Table 5 has no "PVS1 + 1 supporting" pathway at all, so under categorical
+    combining the same downgrade silently demotes every gnomAD-absent nonsense or frameshift variant
+    in a disease gene to VUS — measured on a real batch: KCNT1, CUX2, RELN and HCN2 all dropped.
+    That is an artefact of mixing two frameworks, not a more conservative reading. **Moving to a
+    points-based combiner is the real fix, and is not done.**
     Separately, a **missing** gnomAD annotation is still coerced to `AC=0`, so PM2 cannot distinguish
     "gnomAD never saw this allele" from "the position is outside the MANE-restricted resource".
   - **PS2 vs PM6.** A trio `DN` earns **PS2** (Strong) when the *proband's* genotype is clean, but the

@@ -187,8 +187,8 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   custom gnomAD VCF rebuilt with genome-wide coverage.**
 - **ACMG-SF genes reach Pangolin too**, so an incidental row can carry a real `pangolin_score` and
   earn BP7 or the splice rescue. Previously only panel candidates were scored.
-- **ACMG output is triage-grade**, not a final clinical call (PM1 not assessed; PP2 is gene-level
-  constraint only, no domain/hotspot reasoning; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely
+- **ACMG output is triage-grade**, not a final clinical call (PM1 is regional hotspot evidence, not
+  a curated functional-domain assessment; PP2 is gene-level constraint only; PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely
   on ClinVar AA matching). **BP7 requires a real Pangolin score** — an unscored synonymous variant is
   left unclassified on splicing rather than called benign. PM5 also fires for a
   single-codon in-frame deletion when a P/LP missense exists at the deleted residue (curatorial
@@ -223,16 +223,24 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **PVS1** | LoF: LOFTEE = HC, or truncating consequence with LOFTEE ≠ LC |
 | **PS1** | A **different** variant giving the same AA change is ClinVar P/LP (≥1★); the variant's own ClinVar record is excluded (the AA resource is indexed by source `chr-pos-ref-alt`), so a self-match cannot count one submission as both PS1 and PP5 |
 | **PS2** / **PM6** | De novo in a **full trio** (PS2 — relatedness assumed confirmed) / assumed de novo, poor proband genotype or duo-ambiguous (PM6). PS2 is structurally unreachable without both parents: `inheritance` is only ever `DN` when both are present, singletons get `NA` and duos get `DN/IM`–`DN/IF` |
-| **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Counted at **Supporting** (`PM2_Supporting`) per ClinGen SVI 2020, not ACMG 2015's Moderate — flip `$PM2_STRENGTH` to `'moderate'` to restore. ⚠️ ACMG 2015 has no "PVS1 + 1 supporting" rule, so a gnomAD-absent LoF variant now lands on **VUS** rather than Likely pathogenic |
+| **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Counted at **Moderate** (ACMG 2015) — `$PM2_STRENGTH`. ClinGen SVI 2020 recommends Supporting, and the knob implements it, but ⚠️ **only adopt that with a points-based combiner**: ACMG 2015 has no "PVS1 + 1 supporting" rule, so under categorical combining Supporting demotes every gnomAD-absent LoF variant to VUS (measured: KCNT1, CUX2, RELN, HCN2). That is framework-mixing, not conservatism |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) — **not counted when PVS1 fired**, so one protein-terminus effect cannot yield two ACMG lines via a compound consequence term |
 | **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
+| **PM1** | Missense / in-frame indel inside a **PERv1** pathogenic-variant-enriched region computed **on that same gene** (Pérez-Palma, *Genome Res* 2020 — PM1 is the paper's stated application). Graded by the region's patient-vs-population fold enrichment at the published Tavtigian-2018 calibration: **≥ 18.7 → `PM1_Strong`** (counts at Strong), else `PM1` (Moderate). Gene-wise track only — the paralog/family-wise track is **not** wired in. Not restricted by BP4 (unlike PP2): the regions are validated independently against held-out de novo variants. The region that fired it is written to `flags` as `PM1:<PER>/<aa range>/OR=…`. Needs `$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz`; absent → PM1 never fires. |
 | **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`; five HGNC renames resolved via `%GENE_ALIAS`, and per-panel coverage is printed at startup). Counts **independently of PP3** (separate ACMG lines), but **suppressed when BP4 fires** (no gene-level pathogenic support for a benign-predicted variant). Guard in `acmg_classify` is `!$bp4`; drop it to fire even alongside BP4. |
 | **PP3** / **BP4** | Computational, graded Supp/Mod/Strong (AlphaMissense primary, REVEL fallback) |
 | **PP5** / **BP6** | This variant reported P/LP (PP5) or B/LB (BP6) in ClinVar — **both require ≥1 review star** |
 | **BA1** / **BS1** / **BS2** | gnomAD AF ≥ 5% / ≥ 1% / ≥ 10 homozygotes |
 | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) |
 
-**Not evaluated (manual curation):** PS3/BS3, PS4, PM1, PM3, PP1/BS4, PP4, BP1/BP2/BP3/BP5.
+**Not evaluated (manual curation):** PS3/BS3, PS4, PM3, PP1/BS4, PP4, BP1/BP2/BP3/BP5.
+
+**PM1 and PS1/PM5 may both fire at one residue.** PER regional evidence is validated independently of
+the individual ClinVar submissions behind it, so it is not suppressed — but ClinGen SVI cautions
+against reusing one piece of evidence twice, so the co-occurrence is surfaced as
+`flags=PM1_with_ps1` / `PM1_with_pm5` for the curator to rule on. **PS1/PM5 remain strictly
+same-gene** (the ClinVar AA index is keyed `GENE\tAApos\tRefAA`); there is no paralog transfer
+anywhere in this pipeline.
 
 ## Dependencies
 

@@ -462,7 +462,7 @@ done
 # CSQ layout with the PER field appended, exactly as vep_annotate.sh emits it.
 CSQP="$CSQ|PER"
 # <gene> <consequence> <PER name field>
-csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_pathogenic|0.99||||0|0|0|0|PASS|||%s' \
+csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_pathogenic|0.99||||0|0|0|0|PASS||||%s' \
                 "$1" "$MANE_TX" "$MANE_TX" "$2" "$3"; }
 {
   echo '##fileformat=VCFv4.2'
@@ -491,7 +491,11 @@ csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_patho
   printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
     "$(csq4 "$PANEL_GENE" missense_variant "")"
 } | bgzip -c > "$PD/PMFAM-P.germline.vep.vcf.gz"
-( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl --no-splice >pm1.log 2>&1 )
+# EMIT pass, then an empty Pangolin table so the FINAL pass can run.
+( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pm1.emit.log 2>&1 )
+PIN=$(ls "$PD"/*.pangolin_input.csv 2>/dev/null | head -1)
+[ -n "$PIN" ] && : > "${PIN%.pangolin_input.csv}.pangolin.tsv"
+( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pm1.log 2>&1 )
 POUT=$(ls "$PD"/PMFAM-P.*.candidatos 2>/dev/null | head -1)
 if [ -z "$POUT" ]; then
     bad "section 9: no candidatos"; tail -10 "$PD/pm1.log" | sed 's/^/      /'
