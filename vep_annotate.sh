@@ -40,6 +40,12 @@ GNOMAD_VCF="${GNOMAD_VCF:-$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz
 CLINVAR_VCF="${CLINVAR_VCF:-$VEP_REFS/clinvar/clinvar.chr.vcf.gz}"
 CADD_SNV="${CADD_SNV:-$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz}"            # CADD GRCh38 v1.7
 CADD_INDEL="${CADD_INDEL:-$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz}" # CADD GRCh38 v1.7 indels
+# PERv1 pathogenic-variant-enriched regions for ACMG PM1 (Perez-Palma, Genome Res
+# 2020). Gene-wise track only: the region is evidence about THAT gene. The
+# family-wise/paralog track is deliberately NOT wired in — transferring evidence
+# across paralogs is a separate argument that has not been adopted here. OPTIONAL:
+# absent -> PM1 simply never fires.
+PER_BED="${PER_BED:-$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz}"
 
 # ── Environment ──
 export PERL5LIB="$PERL5LIB_EXTRA:${PERL5LIB:-}"
@@ -52,6 +58,12 @@ export PERL5LIB="$PERL5LIB_EXTRA:${PERL5LIB:-}"
 [[ -s "$CADD_INDEL" ]] || { echo "ERROR: CADD indel file not found: $CADD_INDEL" >&2; exit 1; }
 [[ -s "$CLINVAR_VCF" ]] || { echo "ERROR: ClinVar custom VCF not found: $CLINVAR_VCF" >&2; exit 1; }
 [[ -s "$INPUT"      ]] || { echo "ERROR: input not found or empty: $INPUT" >&2; exit 1; }
+if [[ -s "$PER_BED" ]]; then
+    PER_CUSTOM=(--custom "file=$PER_BED,short_name=PER,format=bed,type=overlap")
+else
+    PER_CUSTOM=()
+    echo "NOTE: PERv1 BED not found ($PER_BED) — ACMG PM1 will not be annotated." >&2
+fi
 
 if ! /usr/bin/perl -MList::MoreUtils -MBio::DB::HTS -MBio::DB::BigFile -e1 2>/dev/null; then
   echo "ERROR: system Perl missing required modules (List::MoreUtils / Bio::DB::HTS / Bio::DB::BigFile)" >&2
@@ -171,7 +183,8 @@ VEP_INPUT="$NORM_INPUT"
   --plugin EVE,file="$VEP_REFS/EVE/eve_merged.vcf.gz" \
   --plugin CADD,"$CADD_SNV","$CADD_INDEL" \
   --custom file="$GNOMAD_VCF",short_name=gnomADmin,format=vcf,type=exact,fields=AC_joint%AN_joint%AF_joint%nhomalt_joint%FILTER \
-  --custom file="$CLINVAR_VCF",short_name=ClinVar,format=vcf,type=exact,fields=CLNSIG%CLNREVSTAT%CLNDN
+  --custom file="$CLINVAR_VCF",short_name=ClinVar,format=vcf,type=exact,fields=CLNSIG%CLNREVSTAT%CLNDN \
+  "${PER_CUSTOM[@]}"
 
 # ── Index output ──
 bcftools index -ft "$OUTPUT" 2>/dev/null || true
