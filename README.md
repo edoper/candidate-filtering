@@ -338,7 +338,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
   | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype); relatedness is assumed confirmed. Structurally unreachable without both parents — `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT |
-  | **PM1** | **Missense / in-frame indel** inside a **PERv1** pathogenic-variant-enriched region computed on the **same gene** (§0.6b). Graded by the region's patient-vs-population fold enrichment at the published calibration: **≥ 18.7 → `PM1_Strong`** (counts at Strong), else Moderate. **Gene-wise track only — no paralog transfer.** Unlike PP2 it is **not** suppressed by BP4: the regions are validated independently, against de novo variants held out of their construction. The region that fired it is echoed to `flags` for audit | PERv1 BED (Pérez-Palma 2020) |
+  | **PM1** | **Missense / in-frame indel** inside a **PERv1** pathogenic-variant-enriched region naming the **same gene** (§0.6b). Two arms: **`PERv1_direct`** graded by its own fold enrichment (**≥ 18.7 → `PM1_Strong`**, else Moderate); **`PERv1_paralog`** — the family-wise arm, the paper's headline result — **capped at Moderate**, since transferring a family's evidence onto one member costs a tier. Direct outranks paralog on overlap. Unlike PP2 it is **not** suppressed by BP4: the regions were validated against de novo variants held out of their construction. The winning arm + region are echoed to `flags` for audit | PERv1 BED (Pérez-Palma 2020) |
   | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), counted at **Moderate** (ACMG 2015). `$PM2_STRENGTH` can switch it to Supporting per [ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/) — see the caveat below before doing so | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when PVS1 fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect, pushing an LP call to Pathogenic | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
@@ -554,7 +554,7 @@ runs normally and PS1/PM5 are simply skipped** with a warning — so you can def
 `vep_annotate.sh` adds an optional `--custom` BED track supplying the ACMG **PM1** criterion:
 
 ```
-$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz   (+ .tbi)     # override with $PER_BED
+$VEP_REFS/PER/PERv1.GRCh38.MANE.bed.gz   (+ .tbi)          # override with $PER_BED
 ```
 
 These are the published PERs (pathogenic-variant-enriched regions) of Pérez-Palma et al., *Genome
@@ -562,12 +562,27 @@ Research* 2020;30(1):62–71, whose stated application is PM1. Supplemental Tabl
 ships them in **GRCh37**; the track used here is rebuilt on GRCh38 by re-deriving each residue's
 position from the MANE backbone (`PERs-v2/scripts/15_perv1_to_bed.pl`), with a reference-amino-acid
 check so residues where the 2019 and present-day MANE transcripts disagree are dropped rather than
-mis-placed. Per-region fold enrichments come from the 2019 run's per-window statistics and set the
-`PM1_Strong` / `PM1_Moderate` grade at the published 18.7 threshold.
+mis-placed. Per-region fold enrichments come from the 2019 run's per-window statistics.
 
-Only the **gene-wise** track is wired in. A family-wise (paralog) track exists but is deliberately
-not used: transferring evidence between paralogs is a separate argument that has not been adopted
-here. For the same reason PS1/PM5 remain strictly same-gene.
+**Both arms of the published method are included**, distinguished in the BED name field:
+
+| arm | what it is | v1 scale | grading |
+|---|---|---|---|
+| `PERv1_direct` | enrichment computed on that gene | 251 PERs / 215 genes | by fold enrichment: ≥ 18.7 Strong, else Moderate |
+| `PERv1_paralog` | enrichment computed across the paralog family alignment, assigned to **every** member — including members carrying none of the underlying variants | 465 PERs / **1,252 genes** | **capped at Moderate** |
+
+The paralog arm is the paper's central result (a 5.8-fold gain in genes covered, 700 of them with no
+prior disease association) and the arm its held-out de novo validation was run on, so leaving it out
+discards most of the method. It is capped at Moderate because the transfer step is a real inferential
+hop: a family-wise region can be driven by one well-studied member, and a paralog inherits it whole.
+Where a variant falls in both arms, direct wins — it is evidence about the gene rather than evidence
+transferred onto it.
+
+On the g4e panel the two arms cover very different ground: direct touches 56 genes / 1,977 bp,
+paralog 170 genes / 22,230 bp. A panel cohort will essentially never trigger the direct arm alone.
+
+**PS1/PM5 remain strictly same-gene** — paralog reasoning enters only through the labelled
+`PERv1_paralog` arm of PM1, never silently.
 
 The BED name field is `/`-delimited, never `|` — it lands inside VEP's pipe-delimited CSQ string, and
 a `|` there would silently shift every downstream field.

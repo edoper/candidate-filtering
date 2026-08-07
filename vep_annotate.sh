@@ -41,11 +41,16 @@ CLINVAR_VCF="${CLINVAR_VCF:-$VEP_REFS/clinvar/clinvar.chr.vcf.gz}"
 CADD_SNV="${CADD_SNV:-$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz}"            # CADD GRCh38 v1.7
 CADD_INDEL="${CADD_INDEL:-$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz}" # CADD GRCh38 v1.7 indels
 # PERv1 pathogenic-variant-enriched regions for ACMG PM1 (Perez-Palma, Genome Res
-# 2020). Gene-wise track only: the region is evidence about THAT gene. The
-# family-wise/paralog track is deliberately NOT wired in — transferring evidence
-# across paralogs is a separate argument that has not been adopted here. OPTIONAL:
-# absent -> PM1 simply never fires.
-PER_BED="${PER_BED:-$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz}"
+# 2020). GRCh38 / MANE Select. Carries BOTH arms of the published method:
+#   PERv1_direct  — enrichment computed on that gene (251 PERs / 215 genes in v1)
+#   PERv1_paralog — enrichment computed across the paralog family alignment and
+#                   assigned to every member (465 PERs / 1,252 genes) -- the
+#                   paper's headline result and the arm its held-out de novo
+#                   validation was run on.
+# Both are positional overlaps; each interval names the gene it belongs to, so
+# filtering_r.pl can require it to match the gene of the CSQ record.
+# OPTIONAL: absent -> PM1 simply never fires.
+PER_BED="${PER_BED:-$VEP_REFS/PER/PERv1.GRCh38.MANE.bed.gz}"
 
 # ── Environment ──
 export PERL5LIB="$PERL5LIB_EXTRA:${PERL5LIB:-}"

@@ -873,13 +873,21 @@ sub acmg_classify {
     push @P, "PP3_".ucfirst($pp3) if $pp3;
     push @B, "BP4_".ucfirst($bp4) if $bp4;
 
-    # PM1: the variant falls in a PERv1 pathogenic-variant-enriched region computed
-    # ON THIS GENE (Perez-Palma et al., Genome Res 2020, whose stated application is
-    # PM1). Graded by the region's patient-vs-population fold enrichment at the
-    # published Tavtigian-2018 calibration: >= 18.7 counts at Strong, otherwise
-    # Moderate. Restricted to missense and in-frame indels, which is what the region
-    # was computed from -- a PER is a missense-burden statement, so it lends nothing
-    # to a splice, synonymous or LoF call (and PVS1 already covers the last).
+    # PM1: the variant falls in a PERv1 pathogenic-variant-enriched region naming
+    # THIS gene (Perez-Palma et al., Genome Res 2020, whose stated application is PM1).
+    # Two arms, both published:
+    #   PERv1_direct  — enrichment computed on this gene. Graded by its own fold
+    #                   enrichment at the Tavtigian-2018 calibration the paper cites:
+    #                   >= 18.7 counts at Strong, else Moderate.
+    #   PERv1_paralog — enrichment computed across the paralog family alignment and
+    #                   assigned to every member, including members carrying none of
+    #                   the underlying variants. This is the paper's headline arm
+    #                   (1,252 genes vs 215) and the one its held-out de novo test
+    #                   validated. Capped at Moderate upstream: the transfer step
+    #                   costs a tier.
+    # Restricted to missense and in-frame indels, which is what the region was
+    # computed from -- a PER is a missense-burden statement, so it lends nothing to a
+    # splice, synonymous or LoF call (and PVS1 already covers the last).
     # Deliberately NOT suppressed when BP4 fires: unlike PP2 (gene-level constraint),
     # PM1 here is regional evidence independently validated against held-out de novo
     # variants, so a benign computational prediction does not negate it.
@@ -1501,6 +1509,10 @@ foreach my $proband (@probands) {
         if ($alt =~ /,/) { $stat{multiallelic}++; next; }   # [#2] should be pre-split
 
         my ($csq) = $info =~ /(?:^|;)CSQ=([^;]*)/;
+        # PERv1 overlap may also sit in a plain INFO tag when the BED was applied
+        # positionally (outside VEP). Read it here so the per-transcript loop below
+        # can fall back to it; the region still has to name this record's gene.
+        my ($per_info) = $info =~ /(?:^|;)PER=([^;]*)/;
         next unless defined $csq;
 
         my $my_id = "$chr-$start-$ref-$alt";
@@ -1859,17 +1871,29 @@ foreach my $proband (@probands) {
             # MANE gene models co-locate in a real exome, and a PER belongs to the
             # gene it was computed on, not to whatever else spans those bases.
             my $per_raw = defined $i{per} ? ($r[$i{per}] // "") : "";
-            my ($pm1_strength, $pm1_detail) = ("", "");
+            # A positional BED overlap is not transcript-specific, so it may also
+            # arrive as a plain INFO tag on a VCF annotated outside VEP. Accept both.
+            $per_raw = $per_info if $per_raw eq "" && defined $per_info && $per_info ne "";
+            my ($pm1_strength, $pm1_detail, $pm1_src, $pm1_rank) = ("", "", "", -1);
             if ($per_raw ne "") {
                 for my $hit (split /&/, $per_raw) {
                     my @pf = split m{/}, $hit;
                     next unless @pf >= 3;
                     next unless defined $gene && $gene ne "" && $pf[0] eq $gene;
                     my ($st) = $pf[2] =~ /^PM1_(Strong|Moderate)$/ or next;
-                    # Keep the strongest region if several overlap.
-                    next if $pm1_strength eq "Strong";
+                    # Rank overlapping regions: a DIRECT region outranks a paralog one
+                    # whatever their strengths, because it is evidence about this gene
+                    # rather than evidence transferred onto it. Within a source, Strong
+                    # outranks Moderate. (Paralog rows are capped at Moderate upstream.)
+                    my $rank = (($pf[1] // "") eq "PERv1_direct" ? 2 : 0)
+                             + ($st eq "Strong" ? 1 : 0);
+                    next if $rank <= $pm1_rank;
+                    $pm1_rank     = $rank;
                     $pm1_strength = $st;
-                    $pm1_detail   = join("/", @pf[3 .. $#pf]);
+                    $pm1_src      = $pf[1] // "";
+                    # arm + region + range + stats; the strength itself is omitted
+                    # because acmg_criteria already carries it.
+                    $pm1_detail   = join("/", $pf[1], @pf[3 .. $#pf]);
                 }
             }
 
@@ -1897,6 +1921,8 @@ foreach my $proband (@probands) {
 
             # Which PER earned PM1, so the curator can audit the call rather than
             # take "PM1_Strong" on trust.
+            # Which region earned PM1, and from which arm, so the curator can tell
+            # "this gene's own hotspot" from "inherited from its paralogs" at a glance.
             push @qc, "PM1:$pm1_detail"
                 if $acmg_crit =~ /(?:^|,)PM1(?:_Strong)?(?:,|$)/ && $pm1_detail ne "";
 

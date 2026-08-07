@@ -226,7 +226,7 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Counted at **Moderate** (ACMG 2015) — `$PM2_STRENGTH`. ClinGen SVI 2020 recommends Supporting, and the knob implements it, but ⚠️ **only adopt that with a points-based combiner**: ACMG 2015 has no "PVS1 + 1 supporting" rule, so under categorical combining Supporting demotes every gnomAD-absent LoF variant to VUS (measured: KCNT1, CUX2, RELN, HCN2). That is framework-mixing, not conservatism |
 | **PM4** | Protein length change (in-frame indel / `stop_lost`) — **not counted when PVS1 fired**, so one protein-terminus effect cannot yield two ACMG lines via a compound consequence term |
 | **PM5** | Different change — or **single-codon in-frame deletion** — at a residue with P/LP missense (≥1★) |
-| **PM1** | Missense / in-frame indel inside a **PERv1** pathogenic-variant-enriched region computed **on that same gene** (Pérez-Palma, *Genome Res* 2020 — PM1 is the paper's stated application). Graded by the region's patient-vs-population fold enrichment at the published Tavtigian-2018 calibration: **≥ 18.7 → `PM1_Strong`** (counts at Strong), else `PM1` (Moderate). Gene-wise track only — the paralog/family-wise track is **not** wired in. Not restricted by BP4 (unlike PP2): the regions are validated independently against held-out de novo variants. The region that fired it is written to `flags` as `PM1:<PER>/<aa range>/OR=…`. Needs `$VEP_REFS/PER/PERv1.gene-wise.GRCh38.bed.gz`; absent → PM1 never fires. |
+| **PM1** | Missense / in-frame indel inside a **PERv1** pathogenic-variant-enriched region naming **that same gene** (Pérez-Palma, *Genome Res* 2020 — PM1 is the paper's stated application). Two arms: **`PERv1_direct`** (enrichment computed on that gene) is graded by its own fold enrichment at the published Tavtigian-2018 calibration — **≥ 18.7 → `PM1_Strong`**, else Moderate; **`PERv1_paralog`** (enrichment computed across the paralog family alignment and assigned to every member — the paper's headline arm, 1,252 genes vs 215, and the one its held-out de novo test validated) is **capped at Moderate**, because transferring a family's evidence onto one member costs a tier. On overlap, direct outranks paralog. Not restricted by BP4 (unlike PP2). The winning arm and region go to `flags` as `PM1:<arm>/<PER>/<aa range>/OR=…`. Needs `$VEP_REFS/PER/PERv1.GRCh38.MANE.bed.gz`; absent → PM1 never fires. |
 | **PP2** | Missense in a missense-constrained gene: gnomAD v4.1.1 `mis.oe < 0.6` (MANE, outliers excluded; `gnomad-mis-constraint.txt`; five HGNC renames resolved via `%GENE_ALIAS`, and per-panel coverage is printed at startup). Counts **independently of PP3** (separate ACMG lines), but **suppressed when BP4 fires** (no gene-level pathogenic support for a benign-predicted variant). Guard in `acmg_classify` is `!$bp4`; drop it to fire even alongside BP4. |
 | **PP3** / **BP4** | Computational, graded Supp/Mod/Strong (AlphaMissense primary, REVEL fallback) |
 | **PP5** / **BP6** | This variant reported P/LP (PP5) or B/LB (BP6) in ClinVar — **both require ≥1 review star** |
@@ -234,6 +234,9 @@ Auto-assigned per variant by `acmg_classify`; combined per categorical ACMG 2015
 | **BP7** | Synonymous with no predicted splice impact (Pangolin < 0.2) |
 
 **Not evaluated (manual curation):** PS3/BS3, PS4, PM3, PP1/BS4, PP4, BP1/BP2/BP3/BP5.
+
+**PS1/PM5 are strictly same-gene and carry no paralog transfer** — that is PM1's job, and only via
+the explicitly-labelled `PERv1_paralog` arm.
 
 **PM1 and PS1/PM5 may both fire at one residue.** PER regional evidence is validated independently of
 the individual ClinVar submissions behind it, so it is not suppressed — but ClinGen SVI cautions

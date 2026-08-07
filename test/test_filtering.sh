@@ -490,6 +490,17 @@ csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_patho
   # 5000: missense with NO PER overlap -> no PM1.
   printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
     "$(csq4 "$PANEL_GENE" missense_variant "")"
+  # 6000: missense in a PARALOG region only -> PM1 at Moderate (transfer costs a tier,
+  # so it is capped even though this region's enrichment is high).
+  printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "$PANEL_GENE/PERv1_paralog/PM1_Moderate/PER1/p.10-20/OR=99/adjP=1e-08")"
+  # 7000: overlaps BOTH a direct-Strong and a paralog region. The direct one is
+  # evidence about this gene rather than transferred onto it, so it must win.
+  printf 'chr2\t7000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "$PANEL_GENE/PERv1_paralog/PM1_Moderate/PER9/p.1-9/OR=50/adjP=0.01&$PANEL_GENE/PERv1_direct/PM1_Strong/PER4/p.5-15/OR=30/adjP=0.002")"
+  # 8000: paralog region belonging to ANOTHER gene -> no PM1 (gene guard).
+  printf 'chr2\t8000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$(csq4 "$PANEL_GENE" missense_variant "OTHERGENE/PERv1_paralog/PM1_Moderate/PER1/p.1-9/OR=50/adjP=0.01")"
 } | bgzip -c > "$PD/PMFAM-P.germline.vep.vcf.gz"
 # EMIT pass, then an empty Pangolin table so the FINAL pass can run.
 ( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pm1.emit.log 2>&1 )
@@ -503,7 +514,7 @@ else
     pcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$POUT"; }
     case ",$(pcol acmg_criteria 1000)," in *,PM1_Strong,*) ok "PM1_Strong awarded in a high-enrichment PER";;
         *) bad "PM1_Strong not awarded (criteria=$(pcol acmg_criteria 1000))";; esac
-    case "$(pcol flags 1000)" in *PM1:PER1/p.30-40*) ok "PM1 region recorded in flags for audit";;
+    case "$(pcol flags 1000)" in *PM1:PERv1_direct/PER1/p.30-40*) ok "PM1 region + arm recorded in flags for audit";;
         *) bad "PM1 region detail missing from flags (flags=$(pcol flags 1000))";; esac
     case ",$(pcol acmg_criteria 2000)," in *,PM1,*) ok "PM1 awarded at Moderate in a low-enrichment PER";;
         *) bad "PM1 (Moderate) not awarded (criteria=$(pcol acmg_criteria 2000))";; esac
@@ -513,6 +524,17 @@ else
         *) ok "PM1 withheld when the PER belongs to a different gene";; esac
     case ",$(pcol acmg_criteria 5000)," in *,PM1*) bad "PM1 fired without any PER overlap";;
         *) ok "PM1 withheld outside every PER";; esac
+    case ",$(pcol acmg_criteria 6000)," in *,PM1,*) ok "paralog PER awards PM1 at Moderate";;
+        *,PM1_Strong,*) bad "paralog PER awarded Strong (cap not applied)";;
+        *) bad "paralog PER awarded no PM1 (criteria=$(pcol acmg_criteria 6000))";; esac
+    case "$(pcol flags 6000)" in *PERv1_paralog*) ok "flags record which arm fired (paralog)";;
+        *) bad "arm not recorded in flags (flags=$(pcol flags 6000))";; esac
+    case ",$(pcol acmg_criteria 7000)," in *,PM1_Strong,*) ok "direct PER outranks an overlapping paralog PER";;
+        *) bad "direct did not win over paralog (criteria=$(pcol acmg_criteria 7000))";; esac
+    case "$(pcol flags 7000)" in *PERv1_direct*) ok "flags record the winning arm (direct)";;
+        *) bad "wrong arm recorded (flags=$(pcol flags 7000))";; esac
+    case ",$(pcol acmg_criteria 8000)," in *,PM1*) bad "PM1 fired from a paralog PER of another gene";;
+        *) ok "PM1 withheld when the paralog PER belongs to a different gene";; esac
 fi
 
 echo
