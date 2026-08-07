@@ -501,6 +501,12 @@ csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_patho
   # 8000: paralog region belonging to ANOTHER gene -> no PM1 (gene guard).
   printf 'chr2\t8000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
     "$(csq4 "$PANEL_GENE" missense_variant "OTHERGENE/PERv1_paralog/PM1_Moderate/PER1/p.1-9/OR=50/adjP=0.01")"
+  # 9000: the overlap arrives as an INFO tag instead of inside CSQ (BED applied
+  # outside VEP). It must be read, and must MERGE with the CSQ field rather than be
+  # shadowed by it -- here CSQ carries only a co-located OTHER gene's region.
+  printf 'chr2\t9000\t.\tG\tA\t500\tPASS\tPER=%s;CSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' \
+    "$PANEL_GENE/PERv1_paralog/PM1_Moderate/PER7/p.60-70/OR=12/adjP=0.004" \
+    "$(csq4 "$PANEL_GENE" missense_variant "OTHERGENE/PERv1_direct/PM1_Strong/PER1/p.1-9/OR=99/adjP=0.001")"
 } | bgzip -c > "$PD/PMFAM-P.germline.vep.vcf.gz"
 # EMIT pass, then an empty Pangolin table so the FINAL pass can run.
 ( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pm1.emit.log 2>&1 )
@@ -535,6 +541,8 @@ else
         *) bad "wrong arm recorded (flags=$(pcol flags 7000))";; esac
     case ",$(pcol acmg_criteria 8000)," in *,PM1*) bad "PM1 fired from a paralog PER of another gene";;
         *) ok "PM1 withheld when the paralog PER belongs to a different gene";; esac
+    case ",$(pcol acmg_criteria 9000)," in *,PM1,*) ok "PER read from an INFO tag, merged with CSQ";;
+        *) bad "INFO-tag PER not read / shadowed by CSQ (criteria=$(pcol acmg_criteria 9000))";; esac
 fi
 
 echo

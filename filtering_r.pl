@@ -1870,10 +1870,15 @@ foreach my $proband (@probands) {
             # region can be checked against the gene of THIS CSQ record: overlapping
             # MANE gene models co-locate in a real exome, and a PER belongs to the
             # gene it was computed on, not to whatever else spans those bases.
-            my $per_raw = defined $i{per} ? ($r[$i{per}] // "") : "";
-            # A positional BED overlap is not transcript-specific, so it may also
-            # arrive as a plain INFO tag on a VCF annotated outside VEP. Accept both.
-            $per_raw = $per_info if $per_raw eq "" && defined $per_info && $per_info ne "";
+            # A positional BED overlap is not transcript-specific, so it may arrive
+            # inside CSQ (VEP --custom) or as a plain INFO tag (BED applied outside
+            # VEP). MERGE both rather than preferring one: a VCF can carry a partial
+            # track in CSQ and the rest in INFO, and preferring CSQ would then hide
+            # the INFO regions whenever CSQ happened to be non-empty -- including
+            # when its only region belongs to a co-located gene and is rejected by
+            # the gene guard below. Duplicates are harmless; ranking dedupes.
+            my $per_csq = defined $i{per} ? ($r[$i{per}] // "") : "";
+            my $per_raw = join("&", grep { defined && $_ ne "" } ($per_csq, $per_info));
             my ($pm1_strength, $pm1_detail, $pm1_src, $pm1_rank) = ("", "", "", -1);
             if ($per_raw ne "") {
                 for my $hit (split /&/, $per_raw) {
