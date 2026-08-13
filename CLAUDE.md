@@ -30,7 +30,6 @@ See `README.md` for the full algorithm reference; this file is the working quick
 | `run_filtering.sh` | End-to-end driver: emit candidates → Pangolin → final filtering → cleanup. |
 | `site.sh` | Every external path (VEP/plugins/Pangolin/ClinVar-AA). Sourced by `vep_annotate.sh` + `run_filtering.sh`; exports the env vars `filtering_r.pl` reads. Override via untracked `site.env`. **No absolute personal paths in tracked code.** |
 | `test/test_filtering.sh` | Regression test (synthetic, ~5s, no VEP/GPU). **Run after touching `filtering_r.pl`** — a broken gate yields a plausible table, not an error. |
-| `run_wgs.sh` / `run_4probands.sh` | One-off batch drivers (WGS 2-of-4 merge; 4 DRAGEN singletons). Idempotent, log to `logs/`. |
 | **Outputs** | `<proband>.<panel>.candidatos` per sample **and** `batch.<panel>.candidatos` — every proband's rows in one table, prefixed with a `sample` column, columns 2..N identical to the per-sample file. |
 | `g4e-2026.txt` | Default gene panel (`gene⇥Association⇥MOI⇥GDV`). Source: Genes4Epilepsy v2026-03 (bahlolab), 1078 genes. GDV (disease + MONDO) carried over from the prior g4e-2025 for the 93 genes that had one; NO_GDV otherwise (v2026-03 has no GDV column). |
 | `typevar.txt` | Consequence whitelist. |
@@ -43,17 +42,17 @@ See `README.md` for the full algorithm reference; this file is the working quick
 ```bash
 # Annotate each family member — name outputs with the role suffix:
 #   -P proband, -M mother, -F father  (filename drives family auto-discovery)
-bash vep_annotate.sh EPIC280.raw.vcf.gz  EPIC280-P.germline.vep.vcf.gz
-bash vep_annotate.sh EPIC280M.raw.vcf.gz EPIC280-M.germline.vep.vcf.gz
+bash vep_annotate.sh FAM002.raw.vcf.gz  FAM002-P.germline.vep.vcf.gz
+bash vep_annotate.sh FAM002M.raw.vcf.gz FAM002-M.germline.vep.vcf.gz
 
 # Full pipeline (emit → Pangolin GPU scoring → final) over all *.germline.vep.vcf.gz
-bash run_filtering.sh                 # default g4e-2026 panel → EPIC280-P.g4e.candidatos
+bash run_filtering.sh                 # default g4e-2026 panel → FAM002-P.g4e.candidatos
 bash run_filtering.sh my_genes.txt    # custom genes-of-interest list (forwarded to both passes)
 
 # Run a batch from its own directory. Put every *.germline.vep.vcf.gz for the batch in
 # ONE directory so the cohort artifact filter can see the whole cohort — reference files
 # resolve from the repo, so the run directory needs nothing but the VCFs.
-WORKDIR=/path/to/batch4-run bash run_filtering.sh
+WORKDIR=/path/to/batch-dir bash run_filtering.sh
 
 # Filtering only (no Pangolin)
 perl filtering_r.pl                   # default panel
@@ -62,8 +61,8 @@ perl filtering_r.pl -l my_genes.txt   # custom panel (-l/--list is the ONLY way;
 perl filtering_r.pl --selftest        # built-in family-discovery self-test
 
 # Force a specific sample as proband (overrides filename auto-discovery)
-PROBAND="EPIC280-M" bash run_filtering.sh
-perl filtering_r.pl --proband EPIC280-M
+PROBAND="FAM002-M" bash run_filtering.sh
+perl filtering_r.pl --proband FAM002-M
 
 # Consult a SINGLE variant (coords offline; HGVS via Ensembl REST) — report everything
 perl filtering_r.pl -v 'chr17-7675088-C-T'              # GRCh38 chr-pos-ref-alt
@@ -123,7 +122,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   or overlapping gene models — e.g. MUTYH) is collapsed to a single row (prefer panel-primary → MANE
   Select → most evidence arms). `--lookup` still reports every annotation.
 - **Dual-inheritance genes** (panel MOI has **both** AD and AR, e.g. `AD, AR`) are treated as **dominant**
-  for the carrier logic: a solitary het passes through as a normal candidate (`recessive_flag` empty),
+  for the carrier logic: a solitary het passes through as a normal candidate (no recessive token in `flags`),
   while a genuine HOM/comp-het still gets the recessive flag. Prevents dropping a dominant-acting variant
   (LoF etc.) just because the gene also has a recessive mechanism. Only **pure** AR/XLR genes use the
   carrier path. The HOM/comp-het flag pass runs for **recessive-capable genes only**, so a purely dominant
@@ -154,7 +153,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   covers recessive ACMG-SF genes. **Opt-in:** `--keep-ar-carriers` / `KEEP_AR_CARRIERS=1` surfaces the
   **strong** such carriers for a targeted 2nd-hit hunt (carrier-only tier: ClinVar P/LP ≥1★, HC-LoF, or ≥2
   strong predictors AM≥0.906/CADD≥28.1/EVE-path/REVEL≥0.773, not Benign/LB; flagged
-  `recessive_flag=carrier-only`). Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit.
+  `flags=carrier-only`). Note a common SNP (high gnomAD AF) is NOT a valid 2nd hit.
 - **AR_hom rescue arm:** a **homozygous, protein-altering** (missense/inframe/stop_lost/start_lost) rare
   MANE variant in a recessive (AR/XLR) panel gene **with AB > 0.75** is kept even with no predictor/ClinVar
   support (`kept_by=AR_hom`). *General rationale* (not case-tuned): a biallelic genotype in a recessive

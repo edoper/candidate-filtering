@@ -31,6 +31,25 @@ inheritance and recessive context for **downstream manual curation**.
 
 ---
 
+## Quick start
+
+```bash
+git clone https://github.com/edoper/candidate-filtering && cd candidate-filtering
+bash test/test_filtering.sh          # synthetic regression suite — no VEP, no data, no GPU, ~5 s
+
+# With real data (after completing Setup below):
+bash vep_annotate.sh patient.raw.vcf.gz FAM01-P.germline.vep.vcf.gz   # annotate one sample
+bash run_filtering.sh                # emit → Pangolin → FAM01-P.g4e.candidatos (curation table)
+
+# Consult a single variant (coords offline, HGVS via Ensembl REST) — gates bypassed, report everything
+perl filtering_r.pl -v 'chr17-7675088-C-T'
+```
+
+The rest of this README is the algorithm reference ([filtering algorithm](#the-filtering-algorithm-filtering_rpl)),
+the from-scratch install ([Setup](#setup)), and the CLI reference ([Usage](#usage)).
+
+---
+
 ## Pipeline overview
 
 ```
@@ -51,7 +70,7 @@ inheritance and recessive context for **downstream manual curation**.
 
 `filtering_r.pl` auto-discovers families by **filename**, using an explicit **role-suffix
 convention**: `<FAMILY>-P` = proband, `<FAMILY>-M` = mother, `<FAMILY>-F` = father (e.g.
-`EPID107-P`, `EPID107-M`, `EPID107-F` form one trio; `EPIC280-P` + `EPIC280-M` a duo). It
+`FAM001-P`, `FAM001-M`, `FAM001-F` form one trio; `FAM002-P` + `FAM002-M` a duo). It
 globs `*.germline.vep.vcf.gz`, groups by the shared `<FAMILY>` prefix, analyzes each `-P`
 sample as a proband, and pairs it with its `-M`/`-F` parents. A name not ending in
 `-P`/`-M`/`-F` is ignored by auto-discovery (still usable via `--proband`). The discovery
@@ -245,7 +264,7 @@ summary reports how many probes were added and the final summary how many Pangol
 When a **real cohort** is auto-analyzed together (≥ `$COHORT_MIN` = **5 samples**, ≥2 probands), the pipeline
 builds an internal *panel of normals*: a one-pass genotype tally (no CSQ, so it is cheap) over all
 input samples counting, per `chr-pos-ref-alt`, how many carry the ALT and their zygosity breakdown.
-A candidate is then **dropped** when it is **both**:
+A candidate is then **dropped** when it is **all three of**:
 
 1. **carried by ≥ `$COHORT_MIN_CARRIERS` (3) samples** — an absolute floor, and
 2. **cohort-recurrent** — carried by ≥ `$COHORT_MAX_FRAC` (25%) of the cohort, and
@@ -272,8 +291,8 @@ per-proband total).
 
 > **Thresholds revised 2026-08.** `$COHORT_MIN` was **10 probands** — a bar no internal batch reaches,
 > since they run 6–9 samples — so the filter had **never fired on a real clinical run**, and the
-> recurrent KMT2C / SYNE1 mismapping artifacts reached every delivered table. Measured on batch4
-> (8 singleton probands) the carrier distribution is cleanly bimodal: the four artifacts sit at 5, 6, 7
+> recurrent KMT2C / SYNE1 mismapping artifacts reached every delivered table. Measured on an
+> internal batch of 8 singleton probands, the carrier distribution is cleanly bimodal: the four artifacts sit at 5, 6, 7
 > and 8 of 8 carriers (63–100%), and the next most recurrent candidate is 2 of 8 (25%). Both new
 > thresholds fall inside that gap. Eligibility and the denominator are now both counted in **samples**;
 > previously eligibility counted probands while the denominator counted all VCFs, which diluted the
@@ -560,7 +579,8 @@ $VEP_REFS/PER/PERv1.GRCh38.MANE.bed.gz   (+ .tbi)          # override with $PER_
 These are the published PERs (pathogenic-variant-enriched regions) of Pérez-Palma et al., *Genome
 Research* 2020;30(1):62–71, whose stated application is PM1. Supplemental Table S2 of that paper
 ships them in **GRCh37**; the track used here is rebuilt on GRCh38 by re-deriving each residue's
-position from the MANE backbone (`PERs-v2/scripts/15_perv1_to_bed.pl`), with a reference-amino-acid
+position from the MANE backbone (script `15_perv1_to_bed.pl` in the companion PERs-v2 replication
+repo — not yet public; the finished BED track is available from the author on request), with a reference-amino-acid
 check so residues where the 2019 and present-day MANE transcripts disagree are dropped rather than
 mis-placed. Per-region fold enrichments come from the 2019 run's per-window statistics.
 
@@ -627,12 +647,12 @@ auto-discovery. Plainly-named singletons also work (each is analysed as its own 
 ```bash
 # 1) Annotate each family member, naming outputs with the role suffix
 #    (-P proband, -M mother, -F father)
-bash vep_annotate.sh EPIC280.raw.vcf.gz    EPIC280-P.germline.vep.vcf.gz
-bash vep_annotate.sh EPIC280M.raw.vcf.gz   EPIC280-M.germline.vep.vcf.gz
+bash vep_annotate.sh FAM002.raw.vcf.gz    FAM002-P.germline.vep.vcf.gz
+bash vep_annotate.sh FAM002M.raw.vcf.gz   FAM002-M.germline.vep.vcf.gz
 
 # 2) Run the full filtering pipeline (emit → Pangolin → final)
 bash run_filtering.sh
-#    → EPIC280-P.g4e.candidatos
+#    → FAM002-P.g4e.candidatos
 ```
 
 ### `filtering_r.pl` command-line flags
@@ -673,7 +693,7 @@ perl filtering_r.pl -l my_genes.txt       # filtering only
   If a custom gene has recessive forms, supply its MOI (column 3 = `AR`) to get the
   recessive threshold, or relax `$FREQ_AD`.
 - Outputs are **namespaced by panel** (`<proband>.<panel>.candidatos`, where `<panel>` is the
-  panel-file basename with any trailing year dropped, e.g. `EPIC280-P.g4e.candidatos` vs `EPIC280-P.Hyperparathyroidism.candidatos`),
+  panel-file basename with any trailing year dropped, e.g. `FAM002-P.g4e.candidatos` vs `FAM002-P.my_genes.candidatos`),
   so different gene lists produce **side-by-side** results instead of overwriting. Pangolin
   scratch is namespaced the same way but deleted after each run (see [Splice scoring](#splice-scoring-pangolin)).
 
@@ -708,8 +728,8 @@ sanitized to `[A-Za-z0-9._-]`, so two variants starting at `chr9-6644629-T-C` gi
 `Lookup.chr9-6644629-T-C_1.g4e.candidatos`.
 
 A pre-annotated VCF can also be analyzed directly with `--lookup <file.germline.vep.vcf.gz>`, in
-which case `<tag>` is the VCF's basename: `--lookup EPIC280-P.germline.vep.vcf.gz` writes
-`Lookup.EPIC280-P.g4e.candidatos`. **Consult output always carries the `Lookup.` prefix**, so it
+which case `<tag>` is the VCF's basename: `--lookup FAM002-P.germline.vep.vcf.gz` writes
+`Lookup.FAM002-P.g4e.candidatos`. **Consult output always carries the `Lookup.` prefix**, so it
 occupies a separate namespace from the `<proband>.<panel>.candidatos` tables a cohort run produces
 and can never overwrite one.
 
@@ -746,9 +766,9 @@ are locked in as parents). To analyze a specific sample — e.g. the mother — 
 full base-name:
 
 ```bash
-PROBAND="EPIC280-M" bash run_filtering.sh             # analyze the mother
-PROBAND="EPIC280-P EPIC280-M" bash run_filtering.sh   # analyze both
-perl filtering_r.pl --proband EPIC280-M              # filtering only
+PROBAND="FAM002-M" bash run_filtering.sh             # analyze the mother
+PROBAND="FAM002-P FAM002-M" bash run_filtering.sh   # analyze both
+perl filtering_r.pl --proband FAM002-M              # filtering only
 ```
 
 The forced sample must have a `<name>.germline.vep.vcf.gz`. Its parents are still derived from
@@ -791,13 +811,16 @@ same shell; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles belong
 | `CLINVAR_VCF` | `$VEP_REFS/clinvar/clinvar.chr.vcf.gz` | `vep_annotate.sh` |
 | `CADD_SNV` | `$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz` | `vep_annotate.sh` |
 | `CADD_INDEL` | `$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz` | `vep_annotate.sh` |
+| `PER_BED` | `$VEP_REFS/PER/PERv1.GRCh38.MANE.bed.gz` | `vep_annotate.sh` — PERv1 track for ACMG PM1 (§0.6b); absent → PM1 never fires |
 | `ENSEMBL_REST` | `https://rest.ensembl.org` | `filtering_r.pl` — HGVS→coordinate recoding; point at a private mirror on an air-gapped host |
 | `KEEP_AR_CARRIERS` | *(unset)* | `filtering_r.pl` — same as `--keep-ar-carriers` |
 | `KEEP_COHORT_ARTIFACTS` | *(unset)* | `filtering_r.pl` — same as `--keep-cohort-artifacts` |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
-`$SPLICE_MIN`, and the cohort-artifact `$COHORT_MIN` / `$COHORT_MAX_FRAC`) are
-edited directly in `filtering_r.pl`. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
+`$SPLICE_MIN`, the splice-probe `$INTRON_MAX_DIST` / `$PROBE_FREQ_MAX`, the cohort-artifact
+`$COHORT_MIN` / `$COHORT_MIN_CARRIERS` / `$COHORT_MAX_FRAC`, the ACMG `$PM2_STRENGTH` knob, and
+the ACMG-SF tier `$SF_*` / QC `$QC_MIN_*` constants) are all constants at the top of
+`filtering_r.pl` and are edited there directly. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
 `--keep-cohort-artifacts` / `KEEP_COHORT_ARTIFACTS` toggle the two drop rules.
 
 ---
@@ -855,7 +878,7 @@ Correctness fixes from a full audit. Everything here changes **which variants re
 
 | Change | Effect |
 |---|---|
-| **PM2 → Supporting** (`$PM2_STRENGTH`) | ClinGen SVI 2020. ⚠️ Under categorical combining this drops gnomAD-absent LoF variants from Likely pathogenic to VUS — see the limitations section |
+| **PM2 strength knob** (`$PM2_STRENGTH`) | Briefly switched to Supporting (ClinGen SVI 2020), then **settled back at Moderate**: under categorical ACMG 2015 combining, Supporting demotes every gnomAD-absent LoF variant to VUS (framework-mixing, not conservatism) — see the limitations section. Adopt Supporting only together with a points-based combiner |
 | **Splice discovery probes** (Stage 2b) | Deep-intronic (≤300 bp) and synonymous variants are scored by Pangolin and rescued if they disrupt splicing. Previously unreachable — the splice arm could only upgrade, never discover |
 | **ACMG-SF genes reach Pangolin** | Incidental rows can finally carry a real `pangolin_score` and earn BP7 / the splice rescue |
 | Probes require gnomAD coverage (`AN > 0`) | The custom gnomAD VCF is MANE-restricted; probing uncovered introns would rescue variants with no frequency filter and a manufactured PM2. Measured: only ~8 of ~22,700 in-window intronic variants per proband are covered — so discovery is real but resource-limited. `--probe-uncovered` widens it |
@@ -879,6 +902,25 @@ Correctness fixes from a full audit. Everything here changes **which variants re
 | Five HGNC aliases for the constraint file + startup coverage line | PP2 was silently dead for renamed genes (GBA1, BMAL1, AFG2A, AFG2B, BLTP1) |
 | Reference files resolve from the repo dir | `$WORKDIR` now works without symlinking the repo into every run directory |
 | Empty Pangolin score map aborts the run | A silent Pangolin failure produced a complete-looking table with the splice arm dead |
+
+## Bundled reference data — provenance & licences
+
+The tracked reference files are redistributed here for reproducibility; they are **not** covered by
+this repo's MIT licence and remain subject to their sources' terms:
+
+| File | Source | Terms |
+|---|---|---|
+| `g4e-2026.txt` | [Genes4Epilepsy](https://github.com/bahlolab/Genes4Epilepsy) v2026-03 (provenance header in the file; GDV column carried over from the prior release) | No explicit upstream licence — redistributed with attribution; cite Oliver et al., *Epilepsia* 2023 |
+| `gnomad-mis-constraint.txt` | gnomAD v4.1.1 constraint metrics (Broad Institute) | gnomAD data are released free of restriction ([terms](https://gnomad.broadinstitute.org/policies)); cite the gnomAD flagship paper |
+| `mane-plus-clinical-names.txt` | NCBI/EMBL-EBI MANE (Select + Plus Clinical transcript list) | Public domain (US Government work / EMBL-EBI open data) |
+| `acmg_sf_v3.2.txt` | Gene list transcribed from ACMG SF v3.2 (Miller et al., *Genet Med* 2023) | Factual gene list; cite the ACMG policy statement |
+| `typevar.txt` | Ensembl/Sequence Ontology consequence terms | Open |
+
+The heavyweight annotation resources (VEP cache, gnomAD VCF, ClinVar, CADD, REVEL, AlphaMissense,
+EVE, Pangolin models, PERv1 BED) are **not** distributed here — see [Setup](#setup) for where each
+comes from and note that some (e.g. CADD, AlphaMissense) restrict commercial use.
+
+---
 
 ## Data privacy
 
