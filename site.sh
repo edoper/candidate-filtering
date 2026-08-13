@@ -22,7 +22,8 @@ export CF_REPO
 if [ -f "$CF_REPO/site.env" ]; then
     _keys=(); _vals=()
     for _v in VEP VEP_DATA VEP_REFS VEP_PLUGINS PERL5LIB_EXTRA HTSLIB_SO \
-              CLINVAR_AA_DIR CONDA_BASE PANGOLIN_ENV PANGOLIN_FASTA PANGOLIN_DB REF_FASTA VEP_FORKS; do
+              CLINVAR_AA_DIR CONDA_BASE PANGOLIN_ENV PANGOLIN_FASTA PANGOLIN_DB REF_FASTA VEP_FORKS \
+              GNOMAD_VCF CLINVAR_VCF CADD_SNV CADD_INDEL PER_BED; do
         [ -n "${!_v:-}" ] && { _keys+=("$_v"); _vals+=("${!_v}"); }
     done
     . "$CF_REPO/site.env"

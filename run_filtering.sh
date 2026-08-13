@@ -22,11 +22,14 @@ set -euo pipefail
 GENES="${1:-}"
 _CF_DIR="$(dirname "$(readlink -f "$0")")"            # resolve before cd
 _CF_SITE="$_CF_DIR/site.sh"
+# Canonicalize the panel path BEFORE cd — otherwise a relative panel resolves
+# against $WORKDIR (or silently falls back to a same-named file in the repo).
+[[ -n "$GENES" ]] && GENES="$(readlink -f "$GENES")"
 cd "${WORKDIR:-$_CF_DIR}"
 
 # Optional: force specific sample(s) as proband, overriding filename-based
-# auto-discovery.  e.g.  PROBAND="EPIC280-M" bash run_filtering.sh
-#                        PROBAND="EPIC280-P EPIC280-M" bash run_filtering.sh genes.txt
+# auto-discovery.  e.g.  PROBAND="FAM002-M" bash run_filtering.sh
+#                        PROBAND="FAM002-P FAM002-M" bash run_filtering.sh genes.txt
 PROBAND_ARGS=()
 for _p in ${PROBAND:-}; do PROBAND_ARGS+=(--proband "$_p"); done
 GENES_ARGS=()
@@ -51,6 +54,13 @@ shopt -s nullglob
 for csv in *.pangolin_input.csv; do
     proband="${csv%.pangolin_input.csv}"
     tsv="$proband.pangolin.tsv"
+    # Zero structural-pass variants: write the (legitimately) empty score map
+    # directly instead of invoking Pangolin on an empty set.
+    if [ "$(wc -l < "$csv")" -le 1 ]; then
+        echo "[pangolin] $proband: no variants to score — writing empty score map"
+        : > "$tsv"
+        continue
+    fi
     echo "[pangolin] scoring $proband ($(($(wc -l < "$csv") - 1)) variants) ..."
     pangolin "$csv" "$FA" "$DB" "$proband.pangolin" -c CHROM,POS,REF,ALT
     perl "$_CF_DIR/parse_pangolin.pl" "$proband.pangolin.csv" > "$tsv"

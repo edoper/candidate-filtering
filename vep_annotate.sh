@@ -79,13 +79,16 @@ fi
 FIRST_CHR=$(set +o pipefail; bcftools query -f '%CHROM\n' "$INPUT" 2>/dev/null | awk 'NR==1{print; exit}')
 [[ -z "$FIRST_CHR" ]] && { echo "ERROR: no variants in $INPUT" >&2; exit 1; }
 
+# Temp copies of the patient VCF are PHI: remove them on ANY exit (failure included),
+# and let mktemp create them 0600 instead of reserving a name with -u.
 CLEANUP=()
+trap 'rm -f -- "${CLEANUP[@]+"${CLEANUP[@]}"}"' EXIT
 if [[ "$FIRST_CHR" == chr* ]]; then
   echo "[vep] Input uses 'chr' prefix — no normalization needed"
   VEP_INPUT="$INPUT"
 else
   echo "[vep] Input lacks 'chr' prefix — normalizing to temp file"
-  VEP_INPUT="$(mktemp -u --suffix=.vcf.gz)"
+  VEP_INPUT="$(mktemp --suffix=.vcf.gz)"
   CLEANUP+=("$VEP_INPUT")
 
   # GRCh38 contig lengths (gnomAD canonical) — added to header so VEP/bcftools
@@ -125,7 +128,7 @@ EOF
         /^##contig=/                  { next }
         /^#CHROM/                     { print contigs; print; next }
         /^#/                          { print; next }
-                                      { $1 = "chr"$1; print }' \
+                                      { $1 = ($1 == "MT" ? "chrM" : "chr"$1); print }' \
     | bgzip > "$VEP_INPUT"
 fi
 
@@ -142,10 +145,12 @@ fi
 # pipeline reads as "absent from gnomAD" — and collects PM2 for it. Indels were hit
 # roughly 1.6x as often as SNVs before this was fixed.
 #
-# -f re-aligns and trims to the reference. Still no --check-ref, so a REF mismatch
-# warns rather than dropping the record.
+# -f re-aligns and trims to the reference. NOTE: with -f, bcftools norm defaults to
+# --check-ref e — a single REF/reference mismatch ABORTS the run. Deliberate: a
+# mismatched build or corrupt record must stop a clinical annotation loudly, not
+# be silently re-annotated around.
 echo "[vep] Splitting multiallelic sites + left-aligning (bcftools norm -m-any -f)"
-NORM_INPUT="$(mktemp -u --suffix=.vcf.gz)"
+NORM_INPUT="$(mktemp --suffix=.vcf.gz)"
 CLEANUP+=("$NORM_INPUT")
 if [ -s "${REF_FASTA:-}" ]; then
     bcftools norm -m-any -f "$REF_FASTA" "$VEP_INPUT" -Oz -o "$NORM_INPUT"
@@ -194,8 +199,7 @@ VEP_INPUT="$NORM_INPUT"
 # ── Index output ──
 bcftools index -ft "$OUTPUT" 2>/dev/null || true
 
-# ── Cleanup temp ──
-for f in "${CLEANUP[@]}"; do rm -f "$f"; done
+# (temp cleanup happens in the EXIT trap, success and failure alike)
 
 # ── Summary ──
 # gnomADmin fields are *inside* CSQ (pipe-separated), not separate INFO tags.
