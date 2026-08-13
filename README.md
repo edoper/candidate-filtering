@@ -160,7 +160,7 @@ the arm's prose name.
 | AlphaMissense | `AM` | `am_score` ≥ `$AM_MIN` = 0.792 (ClinGen PP3) |
 | EVE pathogenic | `EVE` | `eve_class` is Pathogenic |
 | REVEL | `REVEL` | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
-| Pangolin (splice) | `Pangolin` | `$SPLICE_MIN` = 0.5 (max \|Δscore\|) |
+| Pangolin (splice) | `Pangolin` | max \|Δscore\| ≥ `$SPLICE_SUPP` = **0.2** for whitelisted **splice consequences** (`splice_*` terms — aligned with the splice PP3/BP7 boundary so there is no dead zone), ≥ `$SPLICE_MIN` = **0.5** for everything else (incl. discovery probes) |
 | ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
@@ -322,7 +322,7 @@ clinvar_sig, clinvar_stars, clinvar_disease, clinvar_aa, loftee,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
 zygosity, GT, DP, GQ, AB, GT_SOURCE, NCALLERS, CONF,
 inheritance, kept_by,
-acmg_class, acmg_criteria, flags, Association, MOI, GDV`
+acmg_class, acmg_points, acmg_criteria, flags, Association, MOI, GDV`
 
 A run also writes **`batch.<panel>.candidatos`** — every proband's rows in one table, prefixed with a
 `sample` column; columns 2..N are byte-identical to the per-proband header, so anything that reads one
@@ -346,24 +346,26 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 
 ### Automated ACMG/AMP classification & QC flags
 
-- **`acmg_class` / `acmg_criteria`** — a **triage** classification per variant
-  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign / Conflicting), combined per the
-  **categorical ACMG 2015 rules** from the criteria the pipeline evaluates automatically:
+- **`acmg_class` / `acmg_points` / `acmg_criteria`** — a **triage** classification per variant
+  (Pathogenic / Likely_pathogenic / VUS / Likely_benign / Benign), combined per the
+  **ClinGen/Tavtigian Bayesian points system**
+  ([Tavtigian 2020](https://doi.org/10.1038/s41436-019-0735-3); the default — see
+  *Combining* below) from the criteria the pipeline evaluates automatically:
 
   **Pathogenic**
 
   | Criterion | What triggers it | Source |
   |---|---|---|
-  | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC | VEP / LOFTEE |
+  | **PVS1** | LoF: LOFTEE = HC, or a truncating consequence with LOFTEE ≠ LC. **`start_lost` is capped at `PVS1_Moderate`** ([Tayoun 2018](https://doi.org/10.1002/humu.23626): translation can re-initiate at a downstream or alternative start) unless a compound consequence carries another LoF atom. Other Tayoun granularity (last-exon/NMD-escape, gene LoF mechanism) stays with the curator | VEP / LOFTEE |
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
-  | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype); relatedness is assumed confirmed. Structurally unreachable without both parents — `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT |
+  | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype) **in a gene whose panel MOI is dominant-capable** (AD/XLD/XL/dual — de novo occurrence of a het supports nothing under pure-recessive inheritance; the duo path always had this gate, the trio path now matches it). Relatedness is assumed confirmed. Structurally unreachable without both parents — `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT + panel MOI |
   | **PM1** | **Missense / in-frame indel** inside a **PERv1** pathogenic-variant-enriched region naming the **same gene** (§0.6b). Two arms: **`PERv1_direct`** graded by its own fold enrichment (**≥ 18.7 → `PM1_Strong`**, else Moderate); **`PERv1_paralog`** — the family-wise arm, the paper's headline result — **capped at Moderate**, since transferring a family's evidence onto one member costs a tier. Direct outranks paralog on overlap. Unlike PP2 it is **not** suppressed by BP4: the regions were validated against de novo variants held out of their construction. The winning arm + region are echoed to `flags` for audit | PERv1 BED (Pérez-Palma 2020) |
-  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), counted at **Moderate** (ACMG 2015). `$PM2_STRENGTH` can switch it to Supporting per [ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/) — see the caveat below before doing so | gnomAD v4.1 |
-  | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when PVS1 fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect, pushing an LP call to Pathogenic | consequence |
+  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Strength **follows the combiner**: `PM2_Supporting` ([ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/)) under the points default, Moderate under `categorical` — see *Combining* below for why the pairing is load-bearing | gnomAD v4.1 |
+  | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when any PVS1 tier fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
-  | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM` **in a gene whose panel MOI contains AD or XL**. A duo-ambiguous call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — never earns PM6 | parental GT + panel MOI |
+  | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM`. The **dominant-capable MOI gate applies to both paths** (trio and duo): a de novo call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — earns neither PS2 nor PM6 | parental GT + panel MOI |
   | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). Counts **independently of PP3** (both are legitimate separate ACMG lines — gene-level intolerance vs variant-level prediction), but **suppressed when BP4 fires** (a benign-predicted variant gets no gene-level pathogenic support). | gnomAD v4.1.1 constraint |
-  | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below) | AlphaMissense / REVEL |
+  | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below); **a Pangolin score ≥ `$SPLICE_SUPP` = 0.2 adds splice `PP3_Supporting`** (SpliceAI-analogous cutoff, [Walker 2023](https://doi.org/10.1016/j.ajhg.2023.06.002)) when no missense grade applies — **never stacked on full PVS1** (a canonical splice LoF is one splicing effect, not two evidence lines), and capped at Supporting (no published Pangolin calibration supports more) | AlphaMissense / REVEL / Pangolin |
   | **PP5** | This variant is reported pathogenic in ClinVar **with ≥1 review star**. The star gate matches every other ClinVar consumer in the pipeline; without it a single 0-star "no assertion criteria provided" submission (~16% of the P/LP corpus) supplied the criterion that lifts LP to Pathogenic | ClinVar |
 
   **Benign**
@@ -375,7 +377,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **BS2** | ≥ 10 homozygotes in gnomAD | gnomAD v4.1 |
   | **BP4** | Computational benign, graded (see below) | AlphaMissense / REVEL |
   | **BP6** | This variant is reported benign in ClinVar (≥1★) | ClinVar |
-  | **BP7** | Synonymous **and scored** by Pangolin at < 0.2. The score must exist: an unscored variant is unknown, not benign, so BP7 is withheld rather than assumed | Pangolin |
+  | **BP7** | Synonymous **and scored** by Pangolin at < `$SPLICE_SUPP` = 0.2 (the same boundary above which splice PP3 fires, so the two can never overlap). The score must exist: an unscored variant is unknown, not benign, so BP7 is withheld rather than assumed | Pangolin |
 
   **Not evaluated (manual curation only):** PS3/BS3 (functional), PS4 (case-control),
   PM3 (in trans), PP1/BS4 (segregation), PP4 (phenotype specificity), BP1/BP2/BP3/BP5.
@@ -398,7 +400,24 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   supp ≥0.792 / mod ≥0.906 / strong ≥0.990; BP4 supp ≤0.169 / mod ≤0.099), **REVEL** fallback
   ([Pejaver 2022](https://doi.org/10.1016/j.ajhg.2022.10.013): PP3 supp ≥0.644 / mod ≥0.773 /
   strong ≥0.932; BP4 supp ≤0.290 / mod ≤0.183 / strong ≤0.016) — with a **REVEL direction-conflict
-  veto**, mapped to the 2015 tiers (BP4_Moderate → supporting-benign, since 2015 has no benign-Moderate).
+  veto**. A **splice signal** (Pangolin ≥ 0.2) supplies `PP3_Supporting` when no missense grade
+  applies, and **vetoes BP4** the same way a conflicting REVEL does — a variant the missense tool
+  calls benign but that damages splicing is a direction conflict, not benign.
+
+- **Combining (`$COMBINER`, default `points`).** Criteria are summed per
+  [Tavtigian 2020](https://doi.org/10.1038/s41436-019-0735-3): Very Strong = 8, Strong = 4,
+  Moderate = 2, Supporting = 1 (benign mirror negative); **`acmg_points`** reports the sum and the
+  class follows it — **≥ 10 Pathogenic · 6–9 Likely_pathogenic · 0–5 VUS · −1 to −6 Likely_benign ·
+  ≤ −7 Benign**. Two deliberate notes: **BA1 is scored −8** (Very-Strong benign) rather than the
+  standard absolute exclusion, so a ClinVar-P founder allele above the BA1 ceiling surfaces with its
+  tension visible (`clinvar_conflict`) instead of being silently forced Benign before a curator sees
+  it; and **BP4_Moderate carries its true −2** (the 2015 tiers had squashed it to supporting-benign).
+  The previous **categorical ACMG 2015** combiner (Table 5, including its `Conflicting` verdict) is
+  retained for comparison via `ACMG_COMBINER=categorical`; `acmg_points` is computed and reported in
+  both modes. **PM2 strength is coupled to the combiner** (`PM2_Supporting` under points, Moderate
+  under categorical): ACMG 2015 has no "PVS1 + 1 supporting" pathway, so PM2_Supporting under
+  categorical combining silently demotes every gnomAD-absent LoF variant in a disease gene to VUS —
+  framework-mixing the regression test reproduces on purpose.
   **Not a final clinical call**: PM1 is regional hotspot evidence, not a curated functional-domain
   assessment; PP2 is gene-level constraint only (no domain/hotspot
   reasoning); PVS1 doesn't verify gene mechanism/NMD; PS1/PM5 rely on ClinVar AA matching (no independent
@@ -413,12 +432,13 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped),
   `clinvar_conflict` (see below).
 - **`clinvar_conflict`** — the auto-class reached Pathogenic/Likely pathogenic **while a hard benign
-  line fired** (`BP6`/`BS1`/`BS2`/`BA1`). The categorical `Conflicting` verdict requires *both* sides to
-  reach a 2-tier threshold independently, so a single benign criterion never blocks a pathogenic call:
-  `PVS1,PM2,BP6` reads as Likely_pathogenic on a variant ClinVar calls **Benign with review stars**,
-  and a curator sorting by `acmg_class` sees a clean LP. This is a triage tool, so the class is left
-  alone and the contradiction is made visible instead. `BP4` is deliberately excluded — a computational
-  prediction disagreeing with PVS1/PM2 is routine, not a contradiction.
+  line fired** (`BP6`/`BS1`/`BS2`/`BA1`). The points sum nets opposing evidence arithmetically (and
+  the categorical `Conflicting` verdict needs both sides at a 2-tier threshold), so a single benign
+  criterion never blocks a pathogenic call: `PVS1,PS2,BP6` can still total Likely_pathogenic on a
+  variant ClinVar calls **Benign with review stars**, and a curator sorting by `acmg_class` sees a
+  clean LP. This is a triage tool, so the class is left alone and the contradiction is made visible
+  instead. `BP4` is deliberately excluded — a computational prediction disagreeing with PVS1/PM2 is
+  routine, not a contradiction.
 - **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
   sites), so de-novo cannot be confirmed from parental coverage — `DN` rows are flagged
   `DN_unconfirmed`. Inherited rows instead get `inh_lowqual` when the parental call is low quality.
@@ -815,12 +835,13 @@ same shell; `WORKDIR`, `PROBAND`, `ENSEMBL_REST` and the `KEEP_*` toggles belong
 | `ENSEMBL_REST` | `https://rest.ensembl.org` | `filtering_r.pl` — HGVS→coordinate recoding; point at a private mirror on an air-gapped host |
 | `KEEP_AR_CARRIERS` | *(unset)* | `filtering_r.pl` — same as `--keep-ar-carriers` |
 | `KEEP_COHORT_ARTIFACTS` | *(unset)* | `filtering_r.pl` — same as `--keep-cohort-artifacts` |
+| `ACMG_COMBINER` | `points` | `filtering_r.pl` — `points` (Tavtigian 2020, default) or `categorical` (ACMG 2015 Table 5). PM2 strength couples to this unless `PM2_STRENGTH` overrides it |
 
 Filtering thresholds (`$FREQ_AD`, `$FREQ_AR`, `$CADD_MIN`, `$REVEL_MIN`, `$AM_MIN`,
-`$SPLICE_MIN`, the splice-probe `$INTRON_MAX_DIST` / `$PROBE_FREQ_MAX`, the cohort-artifact
-`$COHORT_MIN` / `$COHORT_MIN_CARRIERS` / `$COHORT_MAX_FRAC`, the ACMG `$PM2_STRENGTH` knob, and
-the ACMG-SF tier `$SF_*` / QC `$QC_MIN_*` constants) are all constants at the top of
-`filtering_r.pl` and are edited there directly. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
+`$SPLICE_MIN` / `$SPLICE_SUPP`, the splice-probe `$INTRON_MAX_DIST` / `$PROBE_FREQ_MAX`, the
+cohort-artifact `$COHORT_MIN` / `$COHORT_MIN_CARRIERS` / `$COHORT_MAX_FRAC`, the `$COMBINER` /
+`$PM2_STRENGTH` pair, and the ACMG-SF tier `$SF_*` / QC `$QC_MIN_*` constants) are all constants
+at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carriers` / `KEEP_AR_CARRIERS` and
 `--keep-cohort-artifacts` / `KEEP_COHORT_ARTIFACTS` toggle the two drop rules.
 
 ---
@@ -849,21 +870,15 @@ the ACMG-SF tier `$SF_*` / QC `$QC_MIN_*` constants) are all constants at the to
   way. Synonymous variants therefore remain unclassified on splicing instead of being labelled benign
   on no evidence — use `run_filtering.sh` when that distinction matters.
 - **Known-open triage limitations** (deliberate, not defects — they change *class*, not *coverage*):
-  - **PM2 counts at Moderate** (`$PM2_STRENGTH = 'moderate'`), the ACMG 2015 reading. ClinGen SVI
-    (2020) recommends Supporting and the knob implements it, but ⚠️ **do not flip it while the
-    combining step is categorical.** The SVI downgrade is calibrated for the ClinGen/Tavtigian
-    **Bayesian points** framework, where PVS1=8 and PM2_Supporting=1 sum to 9 and still reach Likely
-    pathogenic. ACMG 2015 Table 5 has no "PVS1 + 1 supporting" pathway at all, so under categorical
-    combining the same downgrade silently demotes every gnomAD-absent nonsense or frameshift variant
-    in a disease gene to VUS — measured on a real batch: KCNT1, CUX2, RELN and HCN2 all dropped.
-    That is an artefact of mixing two frameworks, not a more conservative reading. **Moving to a
-    points-based combiner is the real fix, and is not done.**
-    Separately, a **missing** gnomAD annotation is still coerced to `AC=0`, so PM2 cannot distinguish
-    "gnomAD never saw this allele" from "the position is outside the MANE-restricted resource".
+  - **PM2.** A **missing** gnomAD annotation is coerced to `AC=0`, so PM2 cannot distinguish
+    "gnomAD never saw this allele" from "the position is outside the MANE-restricted resource"
+    (probe rows are guarded; ordinary rows sit inside the covered footprint).
   - **PS2 vs PM6.** A trio `DN` earns **PS2** (Strong) when the *proband's* genotype is clean, but the
     discriminator carries no information about parentage or parental coverage — which is what actually
     separates PS2 from PM6 — and the same rows are stamped `DN_unconfirmed`. Trios are assumed
     confirmed; treat PS2 rows as PM6 unless relatedness and parental coverage were verified.
+    (The dominant-capable **MOI gate** now applies to both PS2 and PM6; the confirmability cap
+    remains open by decision.)
   - **BA1/BS1 use global joint AF**, not popmax or filtering AF, and have no ClinGen exception list, so
     a known pathogenic founder allele that survives the Stage-1 ClinVar exemption can auto-classify as
     Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
@@ -874,11 +889,21 @@ the ACMG-SF tier `$SF_*` / QC `$QC_MIN_*` constants) are all constants at the to
 Correctness fixes from a full audit. Everything here changes **which variants reach the curator** or
 **what class they carry**, so tables produced before this point are not comparable.
 
+### Third pass (2026-08-13): points combiner + calibration fixes
+
+| Change | Effect |
+|---|---|
+| **Points combiner is the default** (`$COMBINER = 'points'`, [Tavtigian 2020](https://doi.org/10.1038/s41436-019-0735-3)) | Classes come from the summed evidence points (new **`acmg_points`** column, reported in both modes); BA1 scored −8 (triage deviation — tension stays visible); BP4_Moderate carries its true −2; no `Conflicting` verdict (tension flags remain). `ACMG_COMBINER=categorical` restores ACMG 2015 Table 5 |
+| **PM2 → Supporting** (coupled to the combiner) | The ClinGen SVI 2020 reading, now safe: PVS1(8) + PM2_Supporting(1) = 9 → Likely_pathogenic. Under `categorical` PM2 couples back to Moderate; the regression test reproduces the framework-mixing demotion that coupling prevents |
+| **PS2/PM6 dominant-MOI gate** | A trio de novo in a pure-AR gene (or under `MOI = NA`) no longer earns PS2 — de novo occurrence supports nothing under recessive inheritance. The duo path already had the gate; the predicate is now the shared `moi_dominant()` (fixing XLD/"dominant" spellings the old duo regex missed) |
+| **`start_lost` capped at `PVS1_Moderate`** (Tayoun 2018) | Was full Strong; translation re-initiation makes a lost start weaker evidence than a mid-gene truncation. A compound consequence with another LoF atom keeps full PVS1 |
+| **Splice dead zone closed** (`$SPLICE_SUPP` = 0.2) | Pangolin ≥ 0.2 now (a) rescues already-whitelisted splice consequences (was 0.5 — a 0.2–0.49 splice variant with no other arm was dropped while BP7 asserted benign only below 0.2) and (b) earns splice **PP3_Supporting** (Walker 2023 SpliceAI-analogous cutoff; capped at Supporting; never stacked on full PVS1; vetoes BP4). Discovery probes keep the 0.5 gate |
+
 ### Second pass (same day)
 
 | Change | Effect |
 |---|---|
-| **PM2 strength knob** (`$PM2_STRENGTH`) | Briefly switched to Supporting (ClinGen SVI 2020), then **settled back at Moderate**: under categorical ACMG 2015 combining, Supporting demotes every gnomAD-absent LoF variant to VUS (framework-mixing, not conservatism) — see the limitations section. Adopt Supporting only together with a points-based combiner |
+| **PM2 strength knob** (`$PM2_STRENGTH`) | Briefly switched to Supporting (ClinGen SVI 2020), then settled back at Moderate: under categorical ACMG 2015 combining, Supporting demotes every gnomAD-absent LoF variant to VUS (framework-mixing, not conservatism). *Superseded by the third pass: the points combiner is now the default and PM2 is Supporting, coupled to the combiner* |
 | **Splice discovery probes** (Stage 2b) | Deep-intronic (≤300 bp) and synonymous variants are scored by Pangolin and rescued if they disrupt splicing. Previously unreachable — the splice arm could only upgrade, never discover |
 | **ACMG-SF genes reach Pangolin** | Incidental rows can finally carry a real `pangolin_score` and earn BP7 / the splice rescue |
 | Probes require gnomAD coverage (`AN > 0`) | The custom gnomAD VCF is MANE-restricted; probing uncovered introns would rescue variants with no frequency filter and a manufactured PM2. Measured: only ~8 of ~22,700 in-window intronic variants per proband are covered — so discovery is real but resource-limited. `--probe-uncovered` widens it |

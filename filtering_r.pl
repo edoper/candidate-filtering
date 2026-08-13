@@ -33,7 +33,8 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * Frequency threshold is MOI-aware: recessive genes tolerate a higher
 #    gnomAD AF than dominant genes.                                    [#6]
 #  * Inclusion (rescue) gate (OR): CADD>=25.3, AlphaMissense>=0.792, EVE path,
-#    REVEL>=0.644, Pangolin>=0.5, ClinVar P/LP, PS1/PM5 (ClinVar AA match), LoF
+#    REVEL>=0.644, Pangolin (>=0.2 for whitelisted splice consequences, >=0.5
+#    otherwise), ClinVar P/LP, PS1/PM5 (ClinVar AA match), LoF
 #    (LOFTEE HC or high-impact truncating consequence), AR_hom (see below). Each
 #    surviving row records which arm(s) fired in a `kept_by` column, using the
 #    tokens CADD/AM/EVE/REVEL/Pangolin/ClinVar/PS1/PM5/LoF/AR_hom.   [#4,#8]
@@ -67,11 +68,13 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
 #  * Automated ACMG/AMP classification (TRIAGE ONLY): per-row acmg_class +
-#    acmg_criteria, combined per the categorical ACMG 2015 rules. PP3/BP4 use a
-#    single CALIBRATED tool — AlphaMissense primary (Bergquist 2025), REVEL
-#    fallback (Pejaver 2022) — graded Supporting/Moderate/Strong with a REVEL
-#    direction-conflict veto, mapped to the 2015 strength tiers (BP4_Moderate ->
-#    supporting-benign, as 2015 has no benign-Moderate). PP2: missense in a gene with
+#    acmg_points + acmg_criteria, combined per $COMBINER — Tavtigian-2020 points
+#    (DEFAULT: 8/4/2/1, class from the summed score) or categorical ACMG 2015.
+#    PP3/BP4 use a single CALIBRATED tool — AlphaMissense primary (Bergquist 2025),
+#    REVEL fallback (Pejaver 2022) — graded Supporting/Moderate/Strong with a REVEL
+#    direction-conflict veto; Pangolin >= 0.2 adds splice PP3_Supporting (never on
+#    top of full PVS1). PVS1: start_lost capped at Moderate (Tayoun 2018).
+#    PS2/PM6 require a dominant-capable panel MOI. PP2: missense in a gene with
 #    low benign-missense variation, from gnomAD v4.1.1 missense constraint (mis.oe <
 #    0.6 on MANE, outliers excluded); counts independently of PP3, but suppressed when
 #    BP4 fired (no gene-level pathogenic support for a benign-predicted variant). Other
@@ -127,7 +130,15 @@ my $FREQ_AR    = 1.0;    # max gnomAD AF (%) for recessive genes (carrier freq)
 my $CADD_MIN   = 25.3;   # CADD PHRED rescue threshold
 my $REVEL_MIN  = 0.644;  # REVEL rescue threshold (ClinGen PP3)
 my $AM_MIN     = 0.792;  # AlphaMissense pathogenicity rescue threshold
-my $SPLICE_MIN = 0.5;    # Pangolin |delta| splice rescue threshold
+my $SPLICE_MIN = 0.5;    # Pangolin |delta| rescue threshold for DISCOVERY PROBES (and non-splice consequences)
+my $SPLICE_SUPP = 0.2;   # Pangolin splice-evidence boundary. At/above: an already-whitelisted
+                         # splice consequence is rescued AND the row earns PP3_Supporting
+                         # (SpliceAI-analogous 0.2 cutoff, Walker et al. AJHG 2023; no published
+                         # Pangolin calibration supports more than Supporting). Below, a scored
+                         # synonymous variant earns BP7. ONE constant for both sides, so the
+                         # benign and pathogenic splice assertions can never overlap or leave
+                         # the former 0.2-0.49 dead zone in which a whitelisted splice variant
+                         # with no other arm was dropped outright.
 
 # ── Splice DISCOVERY probes [#5] ──
 # typevar.txt has no bare `intron_variant` and no bare `synonymous_variant`, so a
@@ -234,22 +245,31 @@ my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopo
 
 # ── Automated ACMG/AMP classification (InterVar-style, triage only) [#2] ──
 my $PM2_AC_MAX  = 1;       # gnomAD AC at/below -> PM2 (absent=0 or singleton=1)
-# PM2 evidence strength. ACMG 2015 lists PM2 as Moderate; ClinGen SVI (2020) recommends
-# downgrading it to SUPPORTING for rare disease, because absence from a population database
-# is weak evidence on its own and is the single most over-applied criterion.
-#
-# DELIBERATELY LEFT AT 'moderate'. The SVI downgrade is only coherent inside the framework
-# it was calibrated in — the ClinGen/Tavtigian Bayesian POINTS system, where PVS1=8 and
-# PM2_Supporting=1 sum to 9 points and still reach Likely pathogenic. This pipeline combines
-# CATEGORICALLY (ACMG 2015 Table 5), which has no "PVS1 + 1 supporting" pathway at all, so
-# the downgrade there silently demotes every gnomAD-absent nonsense/frameshift variant in a
-# disease gene to VUS. Measured on batch4: KCNT1, CUX2, RELN and HCN2 LoF calls all dropped
-# to VUS. That is an artefact of mixing two frameworks, not a more conservative reading.
-#
-# Setting this to 'supporting' is therefore only correct once the combining step is replaced
-# with a points-based one. Until then 'moderate' is the self-consistent choice.
-# See the README limitations section.
-my $PM2_STRENGTH = 'moderate';     # 'moderate' (ACMG 2015) | 'supporting' (ClinGen SVI 2020)
+
+# ── Evidence combining ──
+# 'points' (DEFAULT since 2026-08): the ClinGen/Tavtigian Bayesian points system
+#   (Tavtigian et al., Genet Med 2020): VeryStrong=8, Strong=4, Moderate=2,
+#   Supporting=1; benign mirror negative. Class: >=10 Pathogenic, 6..9
+#   Likely_pathogenic, 0..5 VUS, -1..-6 Likely_benign, <=-7 Benign.
+#   TRIAGE DEVIATION: BA1 is scored as -8 (Very-Strong benign) instead of the
+#   standard absolute exclusion — a ClinVar-P founder allele above the BA1
+#   ceiling must surface with its tension visible (clinvar_conflict flag), not
+#   be silently forced Benign before a curator sees it.
+#   The points class has no "Conflicting" verdict — opposing evidence nets out
+#   arithmetically; hard contradictions still raise flags=clinvar_conflict.
+# 'categorical': ACMG 2015 Table 5 (the pre-2026-08 default), kept for
+#   comparison/audit. acmg_points is computed and reported in BOTH modes.
+my $COMBINER = $ENV{ACMG_COMBINER} // 'points';   # 'points' | 'categorical'
+
+# PM2 evidence strength FOLLOWS THE COMBINER. ClinGen SVI (2020) recommends
+# Supporting — coherent under 'points', where PVS1(8) + PM2_Supporting(1) = 9
+# still reaches Likely_pathogenic. Under 'categorical' the same downgrade is
+# framework-mixing: ACMG 2015 has no "PVS1 + 1 supporting" pathway, so it
+# silently demotes every gnomAD-absent LoF variant in a disease gene to VUS
+# (measured on an internal batch: KCNT1, CUX2, RELN, HCN2). Hence the pairing
+# below; override with env PM2_STRENGTH only if you understand that trade.
+my $PM2_STRENGTH = $ENV{PM2_STRENGTH}
+                // ($COMBINER eq 'points' ? 'supporting' : 'moderate');
 my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare disease)
 my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
 my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
@@ -807,28 +827,47 @@ my %AMP = (
 );
 
 # Automated ACMG/AMP classification (TRIAGE ONLY — not a final clinical call).
-# Criteria are combined per the categorical ACMG 2015 rules. PP3/BP4 come from a
-# single CALIBRATED tool — AlphaMissense primary, REVEL fallback — graded
-# Supporting/Moderate/Strong with a REVEL direction-conflict veto, then mapped to
-# the 2015 strength tiers (PP3_Strong->strong, _Moderate->moderate, _Supporting->
-# supporting; BP4_Strong->strong-benign, BP4_Moderate/_Supporting->supporting-
-# benign, since the 2015 framework has no benign-Moderate tier). [#2]
+# Criteria are combined per $COMBINER: Tavtigian-2020 points (default) or the
+# categorical ACMG 2015 rules. PP3/BP4 come from a single CALIBRATED tool —
+# AlphaMissense primary, REVEL fallback — graded Supporting/Moderate/Strong with
+# a REVEL direction-conflict veto (categorical counting squashes BP4_Moderate to
+# supporting-benign, since 2015 has no benign-Moderate tier; the points sum keeps
+# its true -2). A Pangolin score >= $SPLICE_SUPP adds splice PP3_Supporting when
+# no missense grade and no full PVS1 apply. Returns (class, criteria, points);
+# points are computed in both modes. [#2]
 sub acmg_classify {
     my (%v) = @_;
     my (@P,@B);
 
     # Pathogenic criteria
-    my $pvs1 = ($v{loftee} eq "HC" || ($v{lof_type} && $v{loftee} ne "LC")) ? 1 : 0;
-    push @P, "PVS1" if $pvs1;
+    # PVS1 with partial Tayoun-2018 granularity: start_lost caps at MODERATE
+    # (PVS1_Moderate) — translation can re-initiate at a downstream or alternative
+    # start, so a lost canonical start codon is weaker evidence than a mid-gene
+    # truncation. A compound consequence carrying another LoF atom (e.g.
+    # start_lost&splice_donor_variant) still earns full PVS1 through that atom.
+    # The remaining Tayoun granularity (last-exon/NMD-escape downgrades, gene
+    # LoF-mechanism check) stays with the curator.
+    my @lof_atoms = grep { $LOF_CONS{$_} } split /&/, ($v{consequence} // "");
+    my $lof_other = grep { $_ ne 'start_lost' } @lof_atoms;
+    my $pvs1      = ($v{loftee} eq "HC" || ($lof_other && $v{loftee} ne "LC")) ? 1 : 0;
+    my $pvs1_mod  = (!$pvs1 && (grep { $_ eq 'start_lost' } @lof_atoms)
+                            && $v{loftee} ne "LC") ? 1 : 0;
+    push @P, "PVS1"          if $pvs1;
+    push @P, "PVS1_Moderate" if $pvs1_mod;
+    # De novo: PS2 (confirmed-quality trio DN) / PM6 (assumed). BOTH now require a
+    # dominant-capable panel MOI (AD/XLD/XL/dual) — de novo occurrence of a het
+    # supports nothing under pure-recessive inheritance. The duo path always had
+    # this gate; the trio path previously skipped it. Under a panel with MOI=NA
+    # (plain-symbol custom list) neither fires, matching the documented PM6 rule.
     if ($v{inh} eq "DN") {                        # trio de novo (relatedness assumed)
-        push @P, ($v{gt_clean} ? "PS2" : "PM6");
+        push @P, ($v{gt_clean} ? "PS2" : "PM6") if $v{de_novo_mech};
     } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P, "PM6"; }
     # PM4 is evidence for a protein-length change; PVS1 already covers the loss-of-
     # function reading of the same event. VEP compound terms make them collide
     # (start_lost&inframe_deletion, frameshift_variant&stop_lost) because $lof_type is
     # matched per '&'-atom while this regex matches the whole string — two ACMG lines
     # from one protein-terminus effect, which pushes an LP call to Pathogenic.
-    push @P, "PM4" if !$pvs1 && $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
+    push @P, "PM4" if !$pvs1 && !$pvs1_mod && $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
     # PM2 at the configured strength (see $PM2_STRENGTH). Written as PM2_Supporting when
     # downgraded so the criteria string says which reading produced the class.
     # "Absent from gnomAD" is only assertable where gnomAD actually looked. A splice
@@ -871,6 +910,17 @@ sub acmg_classify {
         $bp4 = ($rv <= $AMP{rv_bp4_strong}) ? "strong"
              : ($rv <= $AMP{rv_bp4_mod})    ? "moderate"
              : ($rv <= $AMP{rv_bp4_supp})   ? "supporting" : "";
+    }
+    # Splice PP3, SUPPORTING ONLY: Pangolin >= $SPLICE_SUPP is calibrated splice-
+    # damage evidence (SpliceAI-analogous 0.2, Walker 2023; no published Pangolin
+    # calibration supports a higher tier). Never stacked on full PVS1 — a canonical
+    # splice LoF is one splicing effect, not two evidence lines (ClinGen SVI).
+    # A missense-based PP3 grade keeps precedence (max, not sum), and a splice
+    # signal at/above the boundary vetoes computational-benign BP4, the same
+    # direction-conflict treatment the REVEL veto applies.
+    if (!$pvs1 && ($v{pangolin} // "") ne "" && $v{pangolin} >= $SPLICE_SUPP) {
+        $pp3 = "supporting" if !$pp3;
+        $bp4 = "";
     }
     push @P, "PP3_".ucfirst($pp3) if $pp3;
     push @B, "BP4_".ucfirst($bp4) if $bp4;
@@ -924,7 +974,7 @@ sub acmg_classify {
     # every synonymous variant in a run without Pangolin, biasing the class away
     # from the splice-active synonymous variants this pipeline exists to surface.
     push @B, "BP7" if $v{consequence} =~ /synonymous_variant/
-                   && $v{pangolin} ne "" && $v{pangolin} < 0.2;
+                   && $v{pangolin} ne "" && $v{pangolin} < $SPLICE_SUPP;
 
     # ── Combine per ACMG 2015. Count by strength tier; graded PP3/BP4 contribute
     #    at their tier (PP3_Strong->PS, _Moderate->PM, _Supporting->PP;
@@ -937,6 +987,7 @@ sub acmg_classify {
     # starts with "PM1", so a bare /^PM\d/ would tally an upgraded criterion at
     # Moderate and silently undo the upgrade.
     my $pm  = grep { /^PM\d/ && !/_(?:Supporting|Strong)$/ } @P;   # PM2, PM4, PM5, PM6
+    $pm += grep { $_ eq "PVS1_Moderate" } @P;      # start_lost, Tayoun-downgraded
     my $pp  = grep { $_ eq "PP2" || $_ eq "PP5" || /^PM\d_Supporting$/ } @P;
     $ps += grep { /^PM\d_Strong$/ } @P;            # PM1_Strong (PERv1 fold enrichment >= 18.7)
     $ps++ if $pp3 eq "strong";
@@ -948,25 +999,42 @@ sub acmg_classify {
     $bs++ if $bp4 eq "strong";
     $bp++ if $bp4 eq "moderate" || $bp4 eq "supporting";
 
-    my $path = ( ($pvs && ($ps >= 1 || $pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2))
-               || $ps >= 2
-               || ($ps >= 1 && ($pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4))) );
-    my $lp   = ( ($pvs && $pm >= 1)
-               || ($ps >= 1 && $pm >= 1)
-               || ($ps >= 1 && $pp >= 2)
-               || $pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4) );
-    my $ben  = ($ba || $bs >= 2);
-    my $lb   = (($bs >= 1 && $bp >= 1) || $bp >= 2);
+    # Evidence points (Tavtigian et al., Genet Med 2020): ALWAYS computed and
+    # reported, whichever combiner names the class. BP4_Moderate — squashed to
+    # supporting-benign by the tierless 2015 counting above — carries its true
+    # -2 here (one extra point beyond the -1 already counted in $bp). BA1 is
+    # scored -8 (triage deviation; see $COMBINER).
+    my $points = 8*$pvs + 4*$ps + 2*$pm + $pp
+               - 8*$ba - 4*$bs - $bp - ($bp4 eq "moderate" ? 1 : 0);
 
-    my $pathy = $path || $lp;
-    my $beny  = $ben  || $lb;
-    my $class = ($pathy && $beny)  ? "Conflicting"
-              :  $path             ? "Pathogenic"
-              :  $lp               ? "Likely_pathogenic"
-              :  $ben              ? "Benign"
-              :  $lb               ? "Likely_benign"
-              :                      "VUS";
-    return ($class, join(",", @P, @B));
+    my $class;
+    if ($COMBINER eq 'points') {
+        $class = $points >= 10 ? "Pathogenic"
+               : $points >= 6  ? "Likely_pathogenic"
+               : $points >= 0  ? "VUS"
+               : $points >= -6 ? "Likely_benign"
+               :                 "Benign";
+    } else {   # 'categorical' — ACMG 2015 Table 5, kept for comparison/audit
+        my $path = ( ($pvs && ($ps >= 1 || $pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2))
+                   || $ps >= 2
+                   || ($ps >= 1 && ($pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4))) );
+        my $lp   = ( ($pvs && $pm >= 1)
+                   || ($ps >= 1 && $pm >= 1)
+                   || ($ps >= 1 && $pp >= 2)
+                   || $pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4) );
+        my $ben  = ($ba || $bs >= 2);
+        my $lb   = (($bs >= 1 && $bp >= 1) || $bp >= 2);
+
+        my $pathy = $path || $lp;
+        my $beny  = $ben  || $lb;
+        $class = ($pathy && $beny)  ? "Conflicting"
+               :  $path             ? "Pathogenic"
+               :  $lp               ? "Likely_pathogenic"
+               :  $ben              ? "Benign"
+               :  $lb               ? "Likely_benign"
+               :                      "VUS";
+    }
+    return ($class, join(",", @P, @B), $points);
 }
 
 #############################################################################
@@ -1375,7 +1443,7 @@ my @COLS = qw(
     loftee
     gnomAD_ac gnomAD_an gnomAD_af gnomAD_nhomalt gnomAD_filter
     zygosity GT DP GQ AB GT_SOURCE NCALLERS CONF
-    inheritance kept_by acmg_class acmg_criteria flags
+    inheritance kept_by acmg_class acmg_points acmg_criteria flags
     Association MOI GDV
 );
 
@@ -1698,7 +1766,13 @@ foreach my $proband (@probands) {
                 push @kept, "AM"       if $am_score ne "" && $am_score >= $AM_MIN;
                 push @kept, "EVE"      if $eve_class =~ /athogenic/;
                 push @kept, "REVEL"    if $revel ne "" && $revel >= $REVEL_MIN;
-                push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $SPLICE_MIN;
+                # Whitelisted splice consequences rescue at the PP3 boundary
+                # ($SPLICE_SUPP): BP7 asserts benign below 0.2, so keeping the 0.5
+                # gate here left a 0.2-0.49 dead zone in which a splice variant with
+                # no other arm was dropped outright. Everything else keeps the
+                # stricter $SPLICE_MIN (discovery probes gate separately below).
+                my $splice_floor = ($consequence =~ /splice/) ? $SPLICE_SUPP : $SPLICE_MIN;
+                push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $splice_floor;
                 push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
                 push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
                 push @kept, $aa_crit   if $aa_crit;   # PS1/PM5 (ClinVar amino-acid evidence)
@@ -1898,15 +1972,15 @@ foreach my $proband (@probands) {
             }
 
             my $gt_susp = grep { /^(lowDP|lowGQ|AB_)/ } @qc;   # GT/DP suspicious?
-            my ($acmg_class,$acmg_crit) = acmg_classify(
-                consequence=>$consequence, lof_type=>$lof_type, loftee=>$loftee,
+            my ($acmg_class,$acmg_crit,$acmg_pts) = acmg_classify(
+                consequence=>$consequence, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
                 ac=>$g_ac, an=>$g_an, probe=>$probe, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, PP5/BP6 star-gate
                 mis_oe=>mis_oe_for($gene),                                    # PP2 (missense constraint)
                 pm1=>$pm1_strength,                                            # PM1 (PERv1 region)
-                de_novo_mech=>(($moi // "") =~ /\bAD\b|\bXL\b/i ? 1 : 0));   # PS2/PM6 [#6]
+                de_novo_mech=>moi_dominant($moi));   # PS2/PM6 dominant-capable gate [#6]
 
             # A pathogenic-leaning auto-class that carries a hard benign line (ClinVar
             # B/LB >=1 star, or a frequency/homozygote criterion) is a contradiction the
@@ -1972,7 +2046,7 @@ foreach my $proband (@probands) {
                     zygosity=>$zyg, GT=>$gt, DP=>$dp, GQ=>$gq, AB=>$ab,
                     GT_SOURCE=>$gtsrc, NCALLERS=>$ncallers, CONF=>$conf,
                     inheritance=>$inheritance, kept_by=>$kept_by,
-                    acmg_class=>$acmg_class, acmg_criteria=>$acmg_crit, flags=>"",
+                    acmg_class=>$acmg_class, acmg_points=>$acmg_pts, acmg_criteria=>$acmg_crit, flags=>"",
                     Association=>($assoc//""), MOI=>$moi, GDV=>($gdv//""),
                 },
             };

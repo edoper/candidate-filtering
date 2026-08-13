@@ -418,20 +418,18 @@ else
             && ok "splice-altering SYNONYMOUS variant discovered" \
             || bad "high-scoring synonymous probe was not rescued"
 
-        # PM2 strength: PVS1 + PM2 alone. At Supporting (ClinGen SVI) 2015 has no
-        # "PVS1 + 1 supporting" rule, so this is VUS; at Moderate it would be LP.
-        pm2c=$(scol acmg_criteria 3000); pm2k=$(scol acmg_class 3000)
-        case ",$pm2c," in *,PM2_Supporting,*) ok "PM2 recorded as PM2_Supporting (ClinGen SVI)";;
-                          *,PM2,*) ok "PM2 recorded at Moderate (ACMG 2015 reading)";;
-                          *) bad "no PM2 on a gnomAD-absent variant (criteria=$pm2c)";; esac
-        case "$pm2c" in
-          *PM2_Supporting*) [ "$pm2k" = "VUS" ] \
-              && ok "PVS1+PM2_Supporting combines to VUS (no such rule in ACMG 2015 Table 5)" \
-              || bad "PVS1+PM2_Supporting gave '$pm2k', expected VUS" ;;
-          *) [ "$pm2k" = "Likely_pathogenic" ] \
-              && ok "PVS1+PM2(Moderate) combines to Likely_pathogenic" \
-              || bad "PVS1+PM2 gave '$pm2k', expected Likely_pathogenic" ;;
-        esac
+        # PM2 strength FOLLOWS THE COMBINER: the points default records
+        # PM2_Supporting (ClinGen SVI 2020), and PVS1(8)+PM2_Supporting(1)=9
+        # reaches Likely_pathogenic — the pathway categorical ACMG 2015 lacks.
+        pm2c=$(scol acmg_criteria 3000); pm2k=$(scol acmg_class 3000); pm2p=$(scol acmg_points 3000)
+        case ",$pm2c," in *,PM2_Supporting,*) ok "PM2 recorded as PM2_Supporting (ClinGen SVI / points default)";;
+                          *) bad "PM2_Supporting missing on a gnomAD-absent variant (criteria=$pm2c)";; esac
+        [ "$pm2k" = "Likely_pathogenic" ] \
+            && ok "PVS1+PM2_Supporting -> Likely_pathogenic under the points combiner" \
+            || bad "PVS1+PM2_Supporting gave '$pm2k', expected Likely_pathogenic (points)"
+        [ "$pm2p" = "9" ] \
+            && ok "acmg_points = 9 (PVS1=8 + PM2_Supporting=1)" \
+            || bad "acmg_points '$pm2p', expected 9 for PVS1+PM2_Supporting"
 
         # An uncovered probe must not earn PM2: AN=0 there means "outside the resource",
         # not "unobserved". Re-run with --probe-uncovered so 1300 (AN=0) is probed, and
@@ -450,6 +448,25 @@ else
         # PS2 scope: this is a SINGLETON run, so inheritance is NA and PS2 must never fire.
         grep -q 'PS2' "$SOUT" && bad "PS2 fired in a singleton run (no parents present)" \
                               || ok "PS2 never fires without a trio (singleton run)"
+
+        # The categorical combiner survives behind ACMG_COMBINER, with PM2 coupled
+        # back to Moderate so ACMG 2015 Table 5 still reaches LP on PVS1+PM2.
+        rm -f "$SOUT"
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical perl filtering_r.pl >scat.log 2>&1 )
+        catc=$(scol acmg_criteria 3000); catk=$(scol acmg_class 3000)
+        case ",$catc," in *,PM2,*) ok "categorical combiner couples PM2 back to Moderate";;
+                          *) bad "categorical run lost the PM2-Moderate coupling (criteria=$catc)";; esac
+        [ "$catk" = "Likely_pathogenic" ] \
+            && ok "categorical: PVS1+PM2(Moderate) -> Likely_pathogenic" \
+            || bad "categorical PVS1+PM2 gave '$catk', expected Likely_pathogenic"
+        # And the framework-mixing guard is real: forcing Supporting under
+        # categorical demotes the same variant to VUS (why the coupling exists).
+        rm -f "$SOUT"
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical PM2_STRENGTH=supporting perl filtering_r.pl >scat2.log 2>&1 )
+        mixk=$(scol acmg_class 3000)
+        [ "$mixk" = "VUS" ] \
+            && ok "framework-mixing demotion reproduced (categorical + PM2_Supporting -> VUS)" \
+            || bad "categorical+Supporting gave '$mixk', expected VUS"
     fi
 fi
 
@@ -543,6 +560,88 @@ else
         *) ok "PM1 withheld when the paralog PER belongs to a different gene";; esac
     case ",$(pcol acmg_criteria 9000)," in *,PM1,*) ok "PER read from an INFO tag, merged with CSQ";;
         *) bad "INFO-tag PER not read / shadowed by CSQ (criteria=$(pcol acmg_criteria 9000))";; esac
+fi
+
+echo "== 10. trio: PS2 MOI gate, PVS1 granularity, splice PP3, points =="
+TRD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD"' EXIT
+for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+    ln -sf "$REPO/$f" "$TRD/$f"
+done
+# CSQ record with NO missense predictor scores (so PP3/BP4 come only from where
+# the test points them): <gene> <consequence> <cadd> <ac> <an> <hgvsc>
+csq5() { printf '%s|1|%s|%s|%s|%s|p.Gly34Ser|100|G/S|34||||%s||||||%s|%s|0|0|PASS|||' \
+                "$1" "$MANE_TX" "$MANE_TX" "$2" "$6" "$3" "$4" "$5"; }
+vhead() { # <sample>
+  echo '##fileformat=VCFv4.2'
+  echo '##contig=<ID=chr2,length=250000000>'
+  echo '##FILTER=<ID=PASS,Description="p">'
+  echo '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">'
+  echo '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">'
+  echo '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="DP">'
+  echo '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">'
+  echo "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: $CSQ\">"
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "$1"
+}
+{ vhead TRFAM-P
+  # 1000: DE NOVO truncating in the DOMINANT panel gene, clean GT -> PS2 fires;
+  # PVS1(8)+PS2(4)+PM2_Supporting(1) = 13 -> Pathogenic.
+  printf 'chr2\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" stop_gained 40 0 200000 'c.100G>A')"
+  # 2000: DE NOVO truncating, HOMOZYGOUS, in the PURE-AR gene -> the MOI gate must
+  # withhold PS2/PM6 (de novo occurrence supports nothing under recessive MOI).
+  printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:2,38:40:99\n' "$(csq5 "$AR_GENE" stop_gained 40 0 200000 'c.150G>A')"
+  # 3000: START_LOST inherited from mother -> PVS1_Moderate (Tayoun cap), never full
+  # PVS1; PVS1_Moderate(2)+PM2_Supporting(1) = 3 -> VUS.
+  printf 'chr2\t3000\t.\tA\tG\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" start_lost 25 0 200000 'c.2T>C')"
+  # 4000: whitelisted splice_region variant, no other arm, Pangolin 0.30 -> the
+  # 0.2 floor keeps it (formerly the 0.2-0.49 dead zone) and earns PP3_Supporting.
+  printf 'chr2\t4000\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_region_variant&intron_variant' 5 1 200000 'c.100+3C>T')"
+} | bgzip -c > "$TRD/TRFAM-P.germline.vep.vcf.gz"
+{ vhead TRFAM-M
+  printf 'chr2\t3000\t.\tA\tG\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" start_lost 25 0 200000 'c.2T>C')"
+} | bgzip -c > "$TRD/TRFAM-M.germline.vep.vcf.gz"
+{ vhead TRFAM-F
+  printf 'chr2\t4000\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_region_variant&intron_variant' 5 1 200000 'c.100+3C>T')"
+} | bgzip -c > "$TRD/TRFAM-F.germline.vep.vcf.gz"
+
+( cd "$TRD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >trpass1.log 2>&1 )
+TIN=$(ls "$TRD"/TRFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
+if [ -z "$TIN" ]; then bad "section 10: pass 1 emitted no pangolin input"; else
+    printf 'chr2-4000-C-T\t0.30\n' > "${TIN%.pangolin_input.csv}.pangolin.tsv"
+    ( cd "$TRD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >trpass2.log 2>&1 )
+fi
+TROUT=$(ls "$TRD"/TRFAM-P.*.candidatos 2>/dev/null | head -1)
+if [ -z "$TROUT" ]; then
+    bad "section 10: no candidatos"; tail -10 "$TRD/trpass2.log" 2>/dev/null | sed 's/^/      /'
+else
+    tcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$TROUT"; }
+    # 1000 — PS2 in a dominant gene
+    case ",$(tcol acmg_criteria 1000)," in *,PS2,*) ok "clean trio de novo in a dominant gene earns PS2";;
+        *) bad "PS2 missing on a clean trio DN (criteria=$(tcol acmg_criteria 1000), inh=$(tcol inheritance 1000))";; esac
+    [ "$(tcol acmg_class 1000)" = "Pathogenic" ] && [ "$(tcol acmg_points 1000)" = "13" ] \
+        && ok "PVS1+PS2+PM2_Supporting = 13 points -> Pathogenic" \
+        || bad "expected Pathogenic/13, got $(tcol acmg_class 1000)/$(tcol acmg_points 1000)"
+    # 2000 — MOI gate in a pure-AR gene
+    case ",$(tcol acmg_criteria 2000)," in *,PS2,*|*,PM6,*) bad "PS2/PM6 fired on a de novo in a PURE-AR gene (criteria=$(tcol acmg_criteria 2000))";;
+        *) ok "PS2/PM6 withheld on a de novo in a pure-AR gene (MOI gate)";; esac
+    # 3000 — Tayoun start_lost cap
+    tc3=$(tcol acmg_criteria 3000)
+    case ",$tc3," in *,PVS1,*) bad "start_lost earned FULL PVS1 (criteria=$tc3)";;
+        *,PVS1_Moderate,*) ok "start_lost capped at PVS1_Moderate (Tayoun 2018)";;
+        *) bad "start_lost earned no PVS1 tier at all (criteria=$tc3)";; esac
+    [ "$(tcol acmg_class 3000)" = "VUS" ] \
+        && ok "PVS1_Moderate+PM2_Supporting = $(tcol acmg_points 3000) points -> VUS" \
+        || bad "start_lost row classed $(tcol acmg_class 3000), expected VUS"
+    # 4000 — splice dead zone closed
+    if [ -n "$(awk -F'\t' 'NR>1 && $2==4000' "$TROUT")" ]; then
+        ok "whitelisted splice variant at Pangolin 0.30 KEPT (dead zone closed)"
+        case "$(tcol kept_by 4000)" in *Pangolin*) ok "kept_by records the Pangolin arm at the 0.2 floor";;
+            *) bad "kept_by=$(tcol kept_by 4000) — splice rescue arm not credited";; esac
+        case ",$(tcol acmg_criteria 4000)," in *,PP3_Supporting,*) ok "Pangolin >= 0.2 earns splice PP3_Supporting";;
+            *) bad "no PP3_Supporting on a 0.30-scoring splice variant (criteria=$(tcol acmg_criteria 4000))";; esac
+    else
+        bad "whitelisted splice variant at Pangolin 0.30 was dropped (dead zone NOT closed)"
+    fi
 fi
 
 echo
