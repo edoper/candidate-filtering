@@ -1,7 +1,6 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Data::Dumper;
 
 # Naming / family-discovery self-test (no data or reference files needed).
 #   perl filtering_r.pl --selftest
@@ -57,13 +56,13 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    carrier states are clinical noise). True comp-hets are unaffected — a gene with >=2
 #    gate-passing hets is a biallelic CompHet and kept. OPT-IN --keep-ar-carriers /
 #    KEEP_AR_CARRIERS=1 surfaces the STRONG such carriers (carrier-only tier: ClinVar
-#    P/LP >=1*, HC-LoF, or >=2 strong predictors AM>=0.906/CADD>=28.1/EVE-path/REVEL>=
-#    0.773, not Benign/LB; flagged flags=carrier-only) for second-hit hunts. [#1,#2,#6]
+#    P/LP >=1*, HC-LoF, or >=2 Moderate-calibrated predictors AM>=0.906/CADD>=28.1/EVE-path/
+#    REVEL>=0.773, not Benign/LB; flagged flags=carrier-only) for second-hit hunts. [#1,#2,#6]
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
 #  * ACMG SF secondary findings: the 81 ACMG SF v3.2 genes are ALWAYS scanned
 #    (independent of the candidate panel) with a STRICTER gate — ClinVar P/LP
-#    (>=1 star, frequency-agnostic) OR novel LOFTEE-HC OR >=2 strong computational
+#    (>=1 star, frequency-agnostic) OR novel LOFTEE-HC OR >=2 Moderate-calibrated computational
 #    predictors (AM>=0.906, CADD>=28.1, EVE path, REVEL>=0.773); AR genes report
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
@@ -223,8 +222,8 @@ my %LOF_CONS = map { $_ => 1 }
 # Emitted into the SAME candidatos output, flagged GDV=Incidental.
 my $ACMG_FILE   = 'acmg_sf_v3.2.txt';
 my $SF_FREQ_MAX = 0.5;     # max gnomAD AF (%) for the NOVEL SF tiers (LoF/computational)
-my $SF_AM       = 0.906;   # AlphaMissense pathogenicity (strong)
-my $SF_CADD     = 28.1;    # CADD PHRED (strong)
+my $SF_AM       = 0.906;   # AlphaMissense (ClinGen PP3_Moderate, Bergquist 2025 — the SF tier needs 2 together)
+my $SF_CADD     = 28.1;    # CADD PHRED (PP3_Moderate, Pejaver 2022; CADD has no Strong interval)
 my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
 
 # ── QC / artifact flags [#7] and parental-quality de-novo confidence [#6] ──
@@ -385,7 +384,7 @@ my $PANEL = (defined $GENES_FILE && $GENES_FILE ne "") ? $GENES_FILE : "g4e-2026
 my $custom_panel = (defined $GENES_FILE && $GENES_FILE ne "") ? 1 : 0;
 
 # Output tag = panel basename without extension, minus any trailing year suffix
-# (e.g. g4e-2026.txt -> g4e, Hyperparathyroidism.txt -> Hyperparathyroidism).
+# (e.g. g4e-2026.txt -> g4e, my_genes.txt -> my_genes).
 # All per-run outputs are namespaced by it so different panels don't overwrite.
 my $PANEL_TAG = $PANEL;
 $PANEL_TAG =~ s{.*/}{};
@@ -419,7 +418,7 @@ if (%mis_oe) {
 # Consequence whitelist (atomic terms recommended; compound entries harmless).
 open VAR, "<", ref_file("typevar.txt") or die "typevar: $!";
 my %varfilter;
-while (my $t = <VAR>) { chomp $t; my ($c,$d) = split /\t/, $t; $varfilter{$c} = $d//""; }
+while (my $t = <VAR>) { chomp $t; next if $t =~ /^#/ || $t !~ /\S/; my ($c,$d) = split /\t/, $t; $varfilter{$c} = $d//""; }
 close VAR;
 print "hash var, listo!\n";
 
@@ -487,8 +486,9 @@ sub csq_columns {
 sub resolve {
     my ($col, @cand) = @_;
     for my $name (@cand) { return $col->{$name} if exists $col->{$name}; }
+    # sorted so the regex fallback binds deterministically if >1 header field matches
     for my $pat (@cand) {
-        for my $name (keys %$col) { return $col->{$name} if $name =~ /$pat/i; }
+        for my $name (sort keys %$col) { return $col->{$name} if $name =~ /$pat/i; }
     }
     return undef;
 }
@@ -839,8 +839,10 @@ sub acmg_classify {
     my $ac_assertable = !($v{probe} && ($v{an} // 0) <= 0);
     push @P, ($PM2_STRENGTH eq 'moderate' ? "PM2" : "PM2_Supporting")
         if $ac_assertable && $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;   # absent or singleton
-    # PP5 requires >=1 review star, like every other ClinVar consumer in this file
-    # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6). Without the gate a single
+    # PP5 requires >=1 review star, like the other ClinVar consumers in this file
+    # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6) — the one deliberate
+    # exception is the star-less ClinVar RESCUE arm, which only keeps a row for
+    # curation and asserts no ACMG criterion. Without the gate a single
     # 0-star "no assertion criteria provided" submission — ~16% of the P/LP corpus —
     # supplied the criterion that lifts an LP call to Pathogenic.
     push @P, "PP5" if clinvar_pathogenic($v{clnsig}) && ($v{clnstar} // 0) >= 1;
@@ -1214,20 +1216,20 @@ sub run_naming_selftest {
 
     print "naming self-test\n";
     my @sr;
-    @sr = sample_role("EPID107-P"); $is->("$sr[0]/$sr[1]", "P/EPID107", "sample_role proband");
-    @sr = sample_role("EPID107-M"); $is->("$sr[0]/$sr[1]", "M/EPID107", "sample_role mother");
-    @sr = sample_role("EPID107-F"); $is->("$sr[0]/$sr[1]", "F/EPID107", "sample_role father");
-    @sr = sample_role("EPID107");   $is->("$sr[0]/$sr[1]", "/",         "non-conforming (no role)");
+    @sr = sample_role("FAM001-P"); $is->("$sr[0]/$sr[1]", "P/FAM001", "sample_role proband");
+    @sr = sample_role("FAM001-M"); $is->("$sr[0]/$sr[1]", "M/FAM001", "sample_role mother");
+    @sr = sample_role("FAM001-F"); $is->("$sr[0]/$sr[1]", "F/FAM001", "sample_role father");
+    @sr = sample_role("FAM001");   $is->("$sr[0]/$sr[1]", "/",         "non-conforming (no role)");
 
     my $recs = discover_families(qw(
-        EPID107-P EPID107-M EPID107-F   EPIC280-P EPIC280-M   STRAY junk-X
+        FAM001-P FAM001-M FAM001-F   FAM002-P FAM002-M   STRAY junk-X
     ));
     my %by = map { $_->{proband} => $_ } @$recs;
     $is->(scalar @$recs,            2,            "two probands discovered");
-    $is->($by{"EPID107-P"}{mother}, "EPID107-M",  "trio mother");
-    $is->($by{"EPID107-P"}{father}, "EPID107-F",  "trio father");
-    $is->($by{"EPIC280-P"}{mother}, "EPIC280-M",  "duo mother");
-    $is->($by{"EPIC280-P"}{father}, undef,        "duo has no father");
+    $is->($by{"FAM001-P"}{mother}, "FAM001-M",  "trio mother");
+    $is->($by{"FAM001-P"}{father}, "FAM001-F",  "trio father");
+    $is->($by{"FAM002-P"}{mother}, "FAM002-M",  "duo mother");
+    $is->($by{"FAM002-P"}{father}, undef,        "duo has no father");
 
     my $fail = grep { !$_ } @ok;
     print $fail ? "naming self-test: $fail FAILED\n" : "naming self-test: all ".scalar(@ok)." passed\n";
@@ -1453,7 +1455,6 @@ foreach my $proband (@probands) {
         consequence   => resolve($col,'Consequence'),
         hgvsc         => resolve($col,'HGVSc'),
         hgvsp         => resolve($col,'HGVSp'),
-        tpos          => resolve($col,'cDNA_position'),
         aa            => resolve($col,'Amino_acids'),
         ppos          => resolve($col,'Protein_position'),
         revel         => resolve($col,'REVEL'),
@@ -1463,8 +1464,6 @@ foreach my $proband (@probands) {
         am_class      => resolve($col,'am_class'),
         am_score      => resolve($col,'am_pathogenicity'),
         loftee        => resolve($col,'LoF'),
-        loftee_filter => resolve($col,'LoF_filter'),
-        loftee_flags  => resolve($col,'LoF_flags'),
         g_ac          => resolve($col,'gnomADmin_AC_joint','gnomad.*AC'),
         g_an          => resolve($col,'gnomADmin_AN_joint','gnomad.*AN'),
         g_nhom        => resolve($col,'gnomADmin_nhomalt_joint','gnomad.*nhomalt'),
@@ -1617,7 +1616,6 @@ foreach my $proband (@probands) {
                 if ($cand_structural || $sf_structural || $probe) && !exists $emit{$my_id};
             $stat{probes}++ if $probe && !$emit_probe{$my_id}++;
             next unless $final;
-            $stat{structural}++ if $cand_structural;
 
             # ── FINAL pass: extract scoring fields (shared by both paths) ──
             my $revel     = field(\@r,$i{revel});
@@ -1627,13 +1625,10 @@ foreach my $proband (@probands) {
             my $am_class  = field(\@r,$i{am_class});
             my $am_score  = field(\@r,$i{am_score});
             my $loftee    = field(\@r,$i{loftee});
-            my $lof_filt  = field(\@r,$i{loftee_filter});
-            my $lof_flag  = field(\@r,$i{loftee_flags});
             my $g_nhom    = field(\@r,$i{g_nhom});
             my $g_filter  = field(\@r,$i{g_filter});
             my $strand    = field(\@r,$i{strand});
             my $hgvsp     = field(\@r,$i{hgvsp});
-            my $tpos      = field(\@r,$i{tpos});
             my $clnstar_n = clinvar_stars($clnstars);          # exact-variant review stars
             my $pangolin  = exists $pscore->{$my_id} ? $pscore->{$my_id} : "";
 
@@ -2081,9 +2076,16 @@ foreach my $proband (@probands) {
         @rows = grep {
             my $biallelic = (zyg_biallelic($_->{zyg}) || ($gene_flag{$_->{gene}} || "") =~ /CompHet/);
             my $solitary_carrier = ($_->{sf_ar} || $_->{rec_ar}) && !$biallelic;
-            !$solitary_carrier      ? 1                       # non-carrier or biallelic: keep
-              : !$KEEP_AR_CARRIERS  ? 0                       # DEFAULT: drop solitary carriers
-              : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));  # opt-in: carrier-only tier
+            my $keep = !$solitary_carrier      ? 1            # non-carrier or biallelic: keep
+                     : !$KEEP_AR_CARRIERS      ? 0            # DEFAULT: drop solitary carriers
+                     : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));  # opt-in: carrier-only tier
+            # A dropped solitary carrier with STRONG evidence is exactly the row that
+            # should prompt a second-hit hunt (deep-intronic / CNV partner the exome
+            # missed) — never delete it silently.
+            printf "  carrier drop: %-28s %-10s strong-evidence solitary het (--keep-ar-carriers surfaces it)\n",
+                   $_->{vid}, $_->{gene}
+                if !$keep && carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data});
+            $keep;
         } @rows;
     }
 
@@ -2172,9 +2174,8 @@ foreach my $proband (@probands) {
             $by_flag{$row->{rec_label}}++ if ($row->{rec_label} // "") ne "";
         }
         print  "  -> $proband.$PANEL_TAG.candidatos\n";
-        # structural-pass is reported as UNIQUE VARIANTS (keys %emit), matching what the
-        # EMIT pass prints. $stat{structural} increments per CSQ annotation, so a variant
-        # on two MANE transcripts counted twice and the two passes disagreed on identical input.
+        # structural-pass is reported as UNIQUE VARIANTS (keys %emit) — a per-CSQ-annotation
+        # count would tally a variant on two MANE transcripts twice.
         printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
                $stat{lines}, $stat{multiallelic}, scalar(keys %emit), $n_prim, $n_inc;
         printf "  splice discovery: %d probe(s) scored, %d rescued by Pangolin >= %s\n",
