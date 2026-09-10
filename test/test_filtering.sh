@@ -17,6 +17,8 @@
 #   6. Batch-level table              — batch.<panel>.candidatos agrees with the per-proband one
 #   7. Genotype + criterion edges     — haploid (hemizygous) GT, plain-XL MOI, the PP5 review-star
 #                                       gate, per-gene row collapse, clinvar_conflict flagging
+#   8-10. combiner, PM1, trio fixture  — points/categorical coupling, PERv1 arms, PS2 MOI gate,
+#                                       splice floors incl. the gnomAD-footprint gate
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -596,6 +598,18 @@ vhead() { # <sample>
   # 4000: whitelisted splice_region variant, no other arm, Pangolin 0.30 -> the
   # 0.2 floor keeps it (formerly the 0.2-0.49 dead zone) and earns PP3_Supporting.
   printf 'chr2\t4000\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_region_variant&intron_variant' 5 1 200000 'c.100+3C>T')"
+  # 5000: whitelisted polypyrimidine-tract variant at -12, NO gnomAD record (AN=0). -12 is
+  # OUTSIDE the resource footprint (exons +/- $GNOMAD_INTRON_PAD = 10), so "absent" means
+  # "never looked at": the rarity gate was a no-op. At Pangolin 0.30 the 0.2 floor used to
+  # keep it as a PM2_Supporting VUS (real case: rs9980730, the gnomAD MAJOR allele). It must
+  # now be held to the probe standard (0.5) and DROPPED.
+  printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1/1:0,40:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_polypyrimidine_tract_variant&intron_variant' 5 0 0 'c.200-12C>T')"
+  # 6000: same geometry, Pangolin 0.60 -> kept (probe standard met), but PM2 withheld and
+  # the row flagged gnomAD_uncovered so the curator knows the frequency was never checked.
+  printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_polypyrimidine_tract_variant&intron_variant' 5 0 0 'c.300-15C>T')"
+  # 7000: INSIDE the footprint (+5) with no gnomAD record -> genuinely absent; the 0.2 floor
+  # and PM2_Supporting still apply (the fix must not widen into a recall loss).
+  printf 'chr2\t7000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" 'splice_region_variant&intron_variant' 5 0 0 'c.400+5G>A')"
 } | bgzip -c > "$TRD/TRFAM-P.germline.vep.vcf.gz"
 { vhead TRFAM-M
   printf 'chr2\t3000\t.\tA\tG\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq5 "$PANEL_GENE" start_lost 25 0 200000 'c.2T>C')"
@@ -607,7 +621,7 @@ vhead() { # <sample>
 ( cd "$TRD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >trpass1.log 2>&1 )
 TIN=$(ls "$TRD"/TRFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
 if [ -z "$TIN" ]; then bad "section 10: pass 1 emitted no pangolin input"; else
-    printf 'chr2-4000-C-T\t0.30\n' > "${TIN%.pangolin_input.csv}.pangolin.tsv"
+    printf 'chr2-4000-C-T\t0.30\nchr2-5000-G-A\t0.30\nchr2-6000-G-A\t0.60\nchr2-7000-G-A\t0.30\n' > "${TIN%.pangolin_input.csv}.pangolin.tsv"
     ( cd "$TRD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >trpass2.log 2>&1 )
 fi
 TROUT=$(ls "$TRD"/TRFAM-P.*.candidatos 2>/dev/null | head -1)
@@ -641,6 +655,30 @@ else
             *) bad "no PP3_Supporting on a 0.30-scoring splice variant (criteria=$(tcol acmg_criteria 4000))";; esac
     else
         bad "whitelisted splice variant at Pangolin 0.30 was dropped (dead zone NOT closed)"
+    fi
+    # 5000/6000/7000 — gnomAD footprint gate on the whitelisted splice rescue
+    if [ -n "$(awk -F'\t' 'NR>1 && $2==5000' "$TROUT")" ]; then
+        bad "uncovered (-12, AN=0) splice variant at Pangolin 0.30 leaked in (criteria=$(tcol acmg_criteria 5000))"
+    else
+        ok "uncovered intronic splice variant held to the 0.5 probe standard (0.30 dropped)"
+    fi
+    if [ -n "$(awk -F'\t' 'NR>1 && $2==6000' "$TROUT")" ]; then
+        ok "uncovered intronic splice variant at Pangolin 0.60 KEPT"
+        case ",$(tcol acmg_criteria 6000)," in *,PM2*) bad "PM2 awarded outside the gnomAD footprint (criteria=$(tcol acmg_criteria 6000))";;
+            *) ok "PM2 withheld on a gnomAD-uncovered whitelisted row";; esac
+        case "$(tcol flags 6000)" in *gnomAD_uncovered*) ok "flags carry gnomAD_uncovered for the curator";;
+            *) bad "gnomAD_uncovered flag missing (flags=$(tcol flags 6000))";; esac
+    else
+        bad "uncovered intronic splice variant at Pangolin 0.60 was dropped"
+    fi
+    if [ -n "$(awk -F'\t' 'NR>1 && $2==7000' "$TROUT")" ]; then
+        ok "in-footprint (+5) gnomAD-absent splice variant still rescued at the 0.2 floor"
+        case ",$(tcol acmg_criteria 7000)," in *,PM2_Supporting,*) ok "PM2_Supporting intact inside the footprint";;
+            *) bad "PM2 lost inside the footprint (criteria=$(tcol acmg_criteria 7000))";; esac
+        case "$(tcol flags 7000)" in *gnomAD_uncovered*) bad "gnomAD_uncovered wrongly flagged inside the footprint";;
+            *) ok "no gnomAD_uncovered flag inside the footprint";; esac
+    else
+        bad "in-footprint gnomAD-absent splice variant at 0.30 was dropped (recall regression)"
     fi
 fi
 

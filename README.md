@@ -160,7 +160,7 @@ the arm's prose name.
 | AlphaMissense | `AM` | `am_score` ≥ `$AM_MIN` = 0.792 (ClinGen PP3) |
 | EVE pathogenic | `EVE` | `eve_class` is Pathogenic |
 | REVEL | `REVEL` | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
-| Pangolin (splice) | `Pangolin` | max \|Δscore\| ≥ `$SPLICE_SUPP` = **0.2** for whitelisted **splice consequences** (`splice_*` terms — aligned with the splice PP3/BP7 boundary so there is no dead zone), ≥ `$SPLICE_MIN` = **0.5** for everything else (incl. discovery probes) |
+| Pangolin (splice) | `Pangolin` | max \|Δscore\| ≥ `$SPLICE_SUPP` = **0.2** for whitelisted **splice consequences** (`splice_*` terms — aligned with the splice PP3/BP7 boundary so there is no dead zone), ≥ `$SPLICE_MIN` = **0.5** for everything else (incl. discovery probes) **and for whitelisted intronic variants beyond the gnomAD footprint with no record** (`gnomad_uncovered()`: HGVSc intron offset > `$GNOMAD_INTRON_PAD` = 10 and `AN = 0` — their rarity was never checked, so they are held to the probe standard, PM2 is withheld and the row is flagged `gnomAD_uncovered`) |
 | ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
 | PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
@@ -240,6 +240,13 @@ Three bounds keep it affordable and honest:
 > ceiling, and **PM2 fires on what is really an annotation gap**. Probing uncovered territory would
 > rescue variants with no working frequency filter *and* a manufactured pathogenic criterion.
 > Requiring `AN > 0` bounds the probe set to where the resource can actually answer the question.
+>
+> The same gap reaches **whitelisted** consequences: the resource is MANE-Select exons ± 10 bp
+> (`$GNOMAD_INTRON_PAD`), while `splice_polypyrimidine_tract_variant` extends to −17 and
+> `splice_region_variant` to ±8. An intronic record beyond the pad with no gnomAD entry is marked
+> uncovered: the Pangolin rescue needs ≥ `$SPLICE_MIN` = 0.5 (not 0.2), PM2 is withheld, and the
+> row is flagged `gnomAD_uncovered`. Two common SNPs (rs9980730, the gnomAD major allele; rs2294560,
+> AF 0.30) had reached a delivered table as PM2_Supporting VUS through this hole (2026-09-09).
 >
 > **Measured consequence.** On a real WGS proband the 300 bp window holds ~22,700 rare intronic
 > variants, of which only **~8** are gnomAD-covered. So with the default the probe set costs almost
@@ -428,7 +435,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   homopolymer — the reference is scanned ±12 bp around the position, so a nearby run also flags —
   error-prone),
   `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
-  `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `cohort_artifact` (recurrent
+  `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `gnomAD_uncovered` (intronic, beyond the gnomAD footprint, frequency never checked), `cohort_artifact` (recurrent
   gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts` — otherwise dropped),
   `clinvar_conflict` (see below).
 - **`clinvar_conflict`** — the auto-class reached Pathogenic/Likely pathogenic **while a hard benign
@@ -908,6 +915,12 @@ Correctness fixes from a full audit. Everything here changes **which variants re
 | **ACMG-SF genes reach Pangolin** | Incidental rows can finally carry a real `pangolin_score` and earn BP7 / the splice rescue |
 | Probes require gnomAD coverage (`AN > 0`) | The custom gnomAD VCF is MANE-restricted; probing uncovered introns would rescue variants with no frequency filter and a manufactured PM2. Measured: only ~8 of ~22,700 in-window intronic variants per proband are covered — so discovery is real but resource-limited. `--probe-uncovered` widens it |
 | PM2 withheld on gnomAD-uncovered probe rows | `AN=0` outside the resource means "not looked at", not "unobserved" |
+
+### 2026-09-09 — gnomAD footprint gate on the whitelisted splice rescue
+
+| Change | Effect |
+|---|---|
+| **`$GNOMAD_INTRON_PAD` = 10 + `gnomad_uncovered()`** | The custom gnomAD VCF is MANE-Select exons ± 10 bp, sites-only. A whitelisted intronic consequence beyond the pad (`splice_polypyrimidine_tract` reaches −17, `splice_region` ±8) with no record reads as "absent" although it was never looked at; it passed every rarity ceiling and collected PM2_Supporting. Such rows now need Pangolin ≥ `$SPLICE_MIN` = 0.5 (the discovery-probe standard, not the 0.2 floor), PM2 is withheld, and `flags` carries `gnomAD_uncovered`. Inside the footprint nothing changes (AN = 0 there is genuinely "absent"). Found on a clinical exome: rs9980730 (homozygous for the 97 % gnomAD major allele, Pangolin 0.31) and rs2294560 (AF 0.30, Pangolin 0.21) reported as VUS. Regression test: section 10, records 5000–7000 |
 | `--no-splice-discovery` | Opt out of the probe set |
 
 ### First pass

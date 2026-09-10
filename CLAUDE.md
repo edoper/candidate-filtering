@@ -131,7 +131,8 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   `;`-separated `flags` column (recessive verdict first), not the former `recessive_flag` + `qc_flag`
   pair. Values: `HOM` / `HEM` / `CompHet(trans)` / `CompHet?` / `carrier-only`, then `lowDP`, `lowGQ`,
   `AB_het`, `AB_hom`, `homopolymer`, `GT_rescued`, `inh_lowqual`, `DN_unconfirmed`,
-  `cohort_artifact`, `clinvar_conflict`.
+  `cohort_artifact`, `clinvar_conflict`, `gnomAD_uncovered` (intronic row beyond the gnomAD
+  footprint with no record — its frequency was never checked).
 - **The recessive verdict is decided per gene but written per row.** The gene-level verdict governs
   which rows survive the carrier drop; the label on each row describes that row — `HOM` only on a
   homozygous row, `HEM` only on a hemizygous one, `CompHet*` on the hets that constitute it. A het in
@@ -175,17 +176,25 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   and synonymous variants in panel/ACMG-SF genes are now **probed**: sent to Pangolin, and kept
   **only** if the splice arm fires (≥ `$SPLICE_MIN`=0.5 — probes keep the strict gate; an
   already-whitelisted **splice consequence** instead rescues at ≥ `$SPLICE_SUPP`=0.2, the same
-  boundary where splice PP3_Supporting fires and below which BP7 asserts benign). A probe that
+  boundary where splice PP3_Supporting fires and below which BP7 asserts benign — **unless the
+  variant is intronic beyond the gnomAD footprint with no record**, see the caveat below: then it
+  is held to the 0.5 probe standard, PM2 is withheld and the row is flagged `gnomAD_uncovered`). A probe that
   scores low simply disappears, so the probe set widens what can be *found* without widening the
   table. Probes additionally require
   **gnomAD coverage (`AN > 0`)** — see the caveat below. Disable with `--no-splice-discovery` or
   `NO_SPLICE_DISCOVERY=1`. Cost: Pangolin runs ~8 variants/s on one GPU.
-- **⚠️ The gnomAD resource is MANE-restricted.** `gnomAD.joint.v4.1.mane.all.vcf.gz` covers MANE
-  transcripts and flanks, *not* deep intronic sequence. An uncovered position yields `AC=""`/`AN=""`,
-  which this code coerces to 0 — so `$freq` computes as 0, passes **every** rarity ceiling, and PM2
-  fires on what is really an annotation gap. That is why probes require `AN > 0`: it bounds the probe
-  set to where the resource can actually answer the question, and stops discovery from manufacturing
-  PM2. **True deep-intronic discovery (beyond the MANE footprint, e.g. CFTR c.3718-2477C>T) needs the
+- **⚠️ The gnomAD resource is MANE-restricted.** `gnomAD.joint.v4.1.mane.all.vcf.gz` is MANE-Select
+  exons **± `$GNOMAD_INTRON_PAD` = 10 bp** (sites-only, `AC_joint > 0`), *not* deep intronic sequence.
+  An uncovered position yields `AC=""`/`AN=""`, which this code coerces to 0 — so `$freq` computes as
+  0, passes **every** rarity ceiling, and PM2 fires on what is really an annotation gap. That is why
+  probes require `AN > 0`: it bounds the probe set to where the resource can actually answer the
+  question, and stops discovery from manufacturing PM2. **Whitelisted** intronic consequences reach
+  beyond the pad too (`splice_polypyrimidine_tract` −17..−3, `splice_region` ±8): a record there with
+  no gnomAD entry is marked by `gnomad_uncovered()` (HGVSc intron offset > pad), the Pangolin rescue
+  needs ≥ `$SPLICE_MIN` = 0.5 instead of 0.2, PM2 is withheld, and the row carries
+  `flags=gnomAD_uncovered`. (2026-09-09: two *common* SNPs — rs9980730, the gnomAD major allele,
+  homozygous; rs2294560, AF 0.30 — had reached a table as PM2_Supporting VUS through this gap.)
+  If the track is rebuilt with a wider pad, raise `$GNOMAD_INTRON_PAD` to match. **True deep-intronic discovery (beyond the MANE footprint, e.g. CFTR c.3718-2477C>T) needs the
   custom gnomAD VCF rebuilt with genome-wide coverage.**
 - **ACMG-SF genes reach Pangolin too**, so an incidental row can carry a real `pangolin_score` and
   earn BP7 or the splice rescue. Previously only panel candidates were scored.

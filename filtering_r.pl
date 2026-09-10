@@ -140,6 +140,22 @@ my $SPLICE_SUPP = 0.2;   # Pangolin splice-evidence boundary. At/above: an alrea
                          # the former 0.2-0.49 dead zone in which a whitelisted splice variant
                          # with no other arm was dropped outright.
 
+# ── gnomAD resource footprint ──
+# The custom gnomAD VCF is built from MANE-Select exons padded by this many bp
+# (mane_select.exons.pad10 in the build command recorded in its header). It is also
+# sites-only with AC_joint > 0, so "AN = 0" means "this allele has no record", which
+# INSIDE the footprint reads as "absent from gnomAD" (legitimately rare) but OUTSIDE it
+# means nothing at all: the position was never sliced in. A whitelisted splice
+# consequence that far into the intron (splice_polypyrimidine_tract is -17..-3,
+# splice_region reaches +8/-8) therefore passes every rarity ceiling unexamined. Found
+# the hard way: two COMMON SNPs (rs9980730, gnomAD 97% major allele homozygous;
+# rs2294560, AF 0.30) were rescued by Pangolin at 0.21-0.31 and reported as
+# PM2_Supporting VUS. gnomad_uncovered() marks such rows; they are then held to the
+# discovery-probe standard (Pangolin >= $SPLICE_MIN), PM2 is withheld, and the row is
+# flagged `gnomAD_uncovered` so the curator knows the frequency was never checked.
+# Rebuild the resource with a wider pad and raise this constant to match.
+my $GNOMAD_INTRON_PAD = 10;
+
 # ── Splice DISCOVERY probes [#5] ──
 # typevar.txt has no bare `intron_variant` and no bare `synonymous_variant`, so a
 # deep-intronic or exonic-synonymous splice-disrupting variant was dropped at Stage 1,
@@ -653,6 +669,16 @@ sub intron_offset {
     return $min;
 }
 
+# Is this intronic variant outside the gnomAD resource footprint (exon +/- $GNOMAD_INTRON_PAD)?
+# Only intronic records can be: exonic/UTR positions are always sliced in. A missing or
+# unparsable HGVSc offset is treated as covered (no assertion without evidence).
+sub gnomad_uncovered {
+    my ($csq, $hgvsc) = @_;
+    return 0 unless $csq =~ /(?:^|&)intron_variant(?:&|$)/;
+    my $off = intron_offset($hgvsc);
+    return (defined $off && $off > $GNOMAD_INTRON_PAD) ? 1 : 0;
+}
+
 # Is a consequence whitelisted? Pass if ANY '&'-separated atom is in the list.
 sub consequence_ok {
     my ($csq) = @_;
@@ -874,8 +900,9 @@ sub acmg_classify {
     # probe rescued from outside the MANE-restricted resource has AN=0 because the position
     # is not IN the resource, not because the allele is unobserved — awarding PM2 there
     # would manufacture pathogenic evidence out of an annotation gap. Scoped to probe rows
-    # so ordinary candidates, which sit inside the covered footprint, are unaffected.
-    my $ac_assertable = !($v{probe} && ($v{an} // 0) <= 0);
+    # and to whitelisted intronic rows beyond the footprint ($v{uncovered}, see
+    # $GNOMAD_INTRON_PAD), so ordinary candidates inside the footprint are unaffected.
+    my $ac_assertable = !(($v{probe} || $v{uncovered}) && ($v{an} // 0) <= 0);
     push @P, ($PM2_STRENGTH eq 'moderate' ? "PM2" : "PM2_Supporting")
         if $ac_assertable && $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;   # absent or singleton
     # PP5 requires >=1 review star, like the other ClinVar consumers in this file
@@ -1757,6 +1784,9 @@ foreach my $proband (@probands) {
             }
             my $cadd_num  = ($cadd eq "") ? 0 : $cadd;
             my $lof_type  = grep { $LOF_CONS{$_} } split /&/, $consequence;
+            # Outside the gnomAD footprint AND unseen there: the rarity gate above was a
+            # no-op for this record (see $GNOMAD_INTRON_PAD).
+            my $uncov     = ($g_an <= 0 && gnomad_uncovered($consequence, $hgvsc)) ? 1 : 0;
 
             # ── Primary candidate inclusion gate (OR) [#4,#8] ──
             my (@kept, $class, $assoc, $moi, $gdv);
@@ -1771,7 +1801,11 @@ foreach my $proband (@probands) {
                 # gate here left a 0.2-0.49 dead zone in which a splice variant with
                 # no other arm was dropped outright. Everything else keeps the
                 # stricter $SPLICE_MIN (discovery probes gate separately below).
-                my $splice_floor = ($consequence =~ /splice/) ? $SPLICE_SUPP : $SPLICE_MIN;
+                # A whitelisted splice consequence whose frequency could NOT be checked
+                # ($uncov: intronic beyond the gnomAD footprint, no record) is held to the
+                # probe standard instead: at 0.2 the floor let common polypyrimidine-tract
+                # SNPs into the table as PM2 VUS.
+                my $splice_floor = ($consequence =~ /splice/ && !$uncov) ? $SPLICE_SUPP : $SPLICE_MIN;
                 push @kept, "Pangolin" if $pangolin ne "" && $pangolin >= $splice_floor;
                 push @kept, "ClinVar"  if clinvar_pathogenic($clnsig);
                 push @kept, "LoF"      if $loftee eq "HC" || ($lof_type && $loftee ne "LC");
@@ -1907,6 +1941,7 @@ foreach my $proband (@probands) {
             push @qc, "GT_rescued"    if $gtsrc ne "" && $gtsrc ne "deepvariant";  # borrowed (non-DV) genotype, no VAF
             push @qc, "inh_lowqual"   if $inh_lowqual;
             push @qc, "DN_unconfirmed" if $inheritance =~ /^DN/;   # no parental ref depth
+            push @qc, "gnomAD_uncovered" if $uncov;   # frequency never checked: outside the resource footprint
             my $qc_flag = join(";", @qc);
 
             # ── [#11] Cohort recurrent-artifact filter (internal panel-of-normals) ──
@@ -1976,7 +2011,7 @@ foreach my $proband (@probands) {
                 consequence=>$consequence, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
-                ac=>$g_ac, an=>$g_an, probe=>$probe, inh=>$inheritance, gt_clean=>(!$gt_susp),
+                ac=>$g_ac, an=>$g_an, probe=>$probe, uncovered=>$uncov, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, PP5/BP6 star-gate
                 mis_oe=>mis_oe_for($gene),                                    # PP2 (missense constraint)
                 pm1=>$pm1_strength,                                            # PM1 (PERv1 region)
