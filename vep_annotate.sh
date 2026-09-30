@@ -167,6 +167,15 @@ else
     PASS_ARGS=(-f 'PASS,.')
 fi
 if [ -s "${REF_FASTA:-}" ]; then
+    # Drop records on contigs the reference lacks (e.g. GRCh38 *_alt calls from an
+    # alt-aware aligner): norm -f aborts on them and VEP/gnomAD cannot annotate them.
+    REF_TARGETS="$(mktemp)"
+    CLEANUP+=("$REF_TARGETS")
+    awk -v OFS='\t' '{print $1, 1, $2}' "${REF_FASTA}.fai" > "$REF_TARGETS"
+    N_OFFREF=$(bcftools view -H "${PASS_ARGS[@]}" "$VEP_INPUT" \
+        | awk 'NR==FNR {ok[$1]=1; next} !($1 in ok)' "$REF_TARGETS" - | wc -l)
+    echo "[vep] Removing $N_OFFREF record(s) on contigs absent from REF_FASTA (alt/decoy)"
+    PASS_ARGS+=(-T "$REF_TARGETS")
     bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
         | bcftools norm -m-any -f "$REF_FASTA" -Oz -o "$NORM_INPUT"
 else
