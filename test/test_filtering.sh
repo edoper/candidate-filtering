@@ -19,6 +19,9 @@
 #                                       gate, per-gene row collapse, clinvar_conflict flagging
 #   8-10. combiner, PM1, trio fixture  — points/categorical coupling, PERv1 arms, PS2 MOI gate,
 #                                       splice floors incl. the gnomAD-footprint gate
+#   11. audit fixes (2026-09-29)       — 0/0 + no-call proband rows skipped, no PS1/PM5 on
+#                                       frameshift/start_lost, no PP3 on PVS1_Moderate, trio cis
+#                                       hets are carriers, no duo PM6 (with a ClinVar AA fixture)
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -680,6 +683,115 @@ else
     else
         bad "in-footprint gnomAD-absent splice variant at 0.30 was dropped (recall regression)"
     fi
+fi
+
+# ─────────────── 11: carrier gate, PS1/PM5/PP3 stacking, cis phasing, duo PM6 ───────────────
+# Audit 2026-09-29. Every case below produced a wrong row before the fix; the ClinVar AA
+# resource is a synthetic fixture, so PS1/PM5 are finally exercised (all other sections
+# run with CLINVAR_AA_DIR empty).
+echo "== 11. non-carrier rows, PS1/PM5/PP3 on LoF, trio cis hets, duo PM6 =="
+ED="$(mktemp -d)"; DD="$(mktemp -d)"; AAD="$(mktemp -d)"
+trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD" "$ED" "$DD" "$AAD"' EXIT
+for d in "$ED" "$DD"; do
+  for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
+           mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+      ln -sf "$REPO/$f" "$d/$f"
+  done
+done
+AR_GENE2=$(awk -F'\t' -v g="$AR_GENE" '!/^#/ && $3=="AR" && $1!=g {print $1; exit}' "$REPO/g4e-2026.txt")
+# <gene> <consequence> <aa> <ppos> <am> <hgvsc>   (gnomAD AC=0 AN=200000, no ClinVar)
+csq6() { printf '%s|1|%s|%s|%s|%s|p.X|100|%s|%s|||||likely_pathogenic|%s||||0|200000|0|0|PASS|||' \
+                "$1" "$MANE_TX" "$MANE_TX" "$2" "$6" "$3" "$4" "$5"; }
+GT1='0/1:20,20:40:99'
+{ vhead E11-P
+  # 1000 / 1100: proband does NOT carry the ALT (0/0 from a split 0/2 site; no-call).
+  # Absent from both parents, so before the fix they were reported de novo.
+  printf 'chr2\t1000\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/0:40,0:40:99\n' "$(csq6 "$PANEL_GENE" missense_variant G/S 34 0.99 'c.100G>A')"
+  printf 'chr2\t1100\t.\tC\tT\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t./.:0,0:0:0\n'    "$(csq6 "$PANEL_GENE" missense_variant G/S 34 0.99 'c.100G>A')"
+  # 2000: frameshift, VEP writes the residue as G/X; a P/LP missense sits at residue 34.
+  printf 'chr2\t2000\t.\tCA\tC\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$PANEL_GENE" frameshift_variant G/X 34 '' c.101del)" "$GT1"
+  # 3000: start_lost M/V with AlphaMissense 0.99; P/LP Met1 records exist (M/V and M/I).
+  printf 'chr2\t3000\t.\tA\tG\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$PANEL_GENE" start_lost M/V 1 0.99 'c.1A>G')" "$GT1"
+  # 4000: positive control, a real missense at residue 34 (G/R) -> PM5 must still fire.
+  printf 'chr2\t4000\t.\tG\tC\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$PANEL_GENE" missense_variant G/R 34 0.99 'c.100G>C')" "$GT1"
+  # 5000 + 5100: two hets in a pure-AR gene, BOTH maternal only -> proven cis -> carrier.
+  printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$AR_GENE" missense_variant G/S 34 0.99 'c.100G>A')" "$GT1"
+  printf 'chr2\t5100\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$AR_GENE" missense_variant G/S 35 0.99 'c.103G>A')" "$GT1"
+  # 6000 + 6100: two hets in another pure-AR gene, one per parent -> CompHet(trans), kept.
+  printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$AR_GENE2" missense_variant G/S 34 0.99 'c.100G>A')" "$GT1"
+  printf 'chr2\t6100\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$AR_GENE2" missense_variant G/S 35 0.99 'c.103G>A')" "$GT1"
+} | bgzip -c > "$ED/E11-P.germline.vep.vcf.gz"
+{ vhead E11-M
+  for p in 2000:CA:C 3000:A:G 4000:G:C 5000:G:A 5100:G:A 6000:G:A; do
+    IFS=: read -r pos r a <<< "$p"
+    printf 'chr2\t%s\t.\t%s\t%s\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$pos" "$r" "$a" "$(csq6 "$PANEL_GENE" missense_variant G/S 34 0.5 'c.1A>G')" "$GT1"
+  done
+} | bgzip -c > "$ED/E11-M.germline.vep.vcf.gz"
+{ vhead E11-F
+  printf 'chr2\t6100\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$AR_GENE2" missense_variant G/S 35 0.99 'c.103G>A')" "$GT1"
+} | bgzip -c > "$ED/E11-F.germline.vep.vcf.gz"
+# Duo (mother only): a missense absent from the mother -> inheritance DN/IF.
+{ vhead D11-P
+  printf 'chr2\t7000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$PANEL_GENE" missense_variant G/S 50 0.99 'c.148G>A')" "$GT1"
+} | bgzip -c > "$DD/D11-P.germline.vep.vcf.gz"
+{ vhead D11-M
+  printf 'chr2\t9999\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t%s\n' "$(csq6 "$PANEL_GENE" missense_variant G/S 60 0.5 'c.178G>A')" "$GT1"
+} | bgzip -c > "$DD/D11-M.germline.vep.vcf.gz"
+# Synthetic ClinVar AA resource (32 cols; the loader reads 3-6 source id, 8 gene,
+# 11 review status, 23 AApos, 24 RefAA, 28 AltAA). Source ids are other positions, so
+# nothing self-matches.
+aarow() { # <pos> <gene> <aapos> <ref> <alt>
+  awk -v OFS='\t' -v p="$1" -v g="$2" -v ap="$3" -v r="$4" -v a="$5" 'BEGIN{
+    for(i=1;i<=32;i++) f[i]="x"; f[3]="chr2"; f[4]=p; f[5]="A"; f[6]="T"; f[8]=g;
+    f[11]="criteria provided, single submitter"; f[23]=ap; f[24]=r; f[28]=a;
+    s=f[1]; for(i=2;i<=32;i++) s=s OFS f[i]; print s }'; }
+{ printf 'H%.0s\t' $(seq 31); echo H
+  aarow 90001 "$PANEL_GENE" 34 G S
+  aarow 90002 "$PANEL_GENE" 1  M V
+  aarow 90003 "$PANEL_GENE" 1  M I
+} > "$AAD/clinvar.MANE_missense.PLP.tsv"
+{ printf 'H%.0s\t' $(seq 31); echo H; } > "$AAD/clinvar.MANE_missense.BLB.tsv"
+two_pass() { # <dir> <proband>
+  ( cd "$1" && CLINVAR_AA_DIR="$AAD" REF_FASTA= perl filtering_r.pl >p1.log 2>&1 )
+  local tin; tin=$(ls "$1/$2".*.pangolin_input.csv 2>/dev/null | head -1)
+  [ -n "$tin" ] && printf 'chr2-0-N-N\t0\n' > "${tin%.pangolin_input.csv}.pangolin.tsv"
+  ( cd "$1" && CLINVAR_AA_DIR="$AAD" REF_FASTA= perl filtering_r.pl >p2.log 2>&1 )
+}
+two_pass "$ED" E11-P; two_pass "$DD" D11-P
+EOUT=$(ls "$ED"/E11-P.*.candidatos 2>/dev/null | head -1)
+DOUT=$(ls "$DD"/D11-P.*.candidatos 2>/dev/null | head -1)
+if [ -z "$EOUT" ] || [ -z "$DOUT" ]; then
+    bad "section 11: no candidatos"; tail -5 "$ED/p2.log" "$DD/p2.log" 2>/dev/null | sed 's/^/      /'
+else
+    ecol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$3"; }
+    has()  { [ -n "$(awk -F'\t' -v p="$1" 'NR>1 && $2==p' "$2")" ]; }
+    has 1000 "$EOUT" && bad "0/0 proband record became a candidate (inh=$(ecol inheritance 1000 "$EOUT"))" \
+                     || ok  "0/0 proband record skipped (proband must carry the ALT)"
+    has 1100 "$EOUT" && bad "./. proband record became a candidate" || ok "no-call proband record skipped"
+    grep -q 'proband non-carrier (0/0, no-call) skipped' "$ED/p2.log" \
+        && ok "non-carrier skip count is logged" || bad "non-carrier skip count not logged"
+    c2=$(ecol acmg_criteria 2000 "$EOUT")
+    case ",$c2," in *,PM5*|*,PS1*) bad "frameshift (G/X) earned PS1/PM5 on top of PVS1 (criteria=$c2)";;
+        *,PVS1,*) ok "frameshift keeps PVS1 without PS1/PM5 ($c2)";;
+        *) bad "frameshift lost PVS1 (criteria=$c2)";; esac
+    c3=$(ecol acmg_criteria 3000 "$EOUT")
+    case ",$c3," in *,PS1*|*,PM5*|*,PP3*) bad "start_lost stacked PS1/PM5/PP3 on PVS1_Moderate (criteria=$c3)";;
+        *,PVS1_Moderate,*) ok "start_lost stays PVS1_Moderate, no PS1/PM5/PP3 ($c3)";;
+        *) bad "start_lost lost PVS1_Moderate (criteria=$c3)";; esac
+    [ "$(ecol acmg_class 3000 "$EOUT")" = "VUS" ] && ok "start_lost with AM 0.99 + P/LP Met1 still VUS (cap holds)" \
+        || bad "start_lost classed $(ecol acmg_class 3000 "$EOUT") ($(ecol acmg_points 3000 "$EOUT") pts), expected VUS"
+    case ",$(ecol acmg_criteria 4000 "$EOUT")," in *,PM5*) ok "real missense at a P/LP residue still earns PM5";;
+        *) bad "PM5 lost on a real missense (criteria=$(ecol acmg_criteria 4000 "$EOUT"))";; esac
+    if has 5000 "$EOUT" || has 5100 "$EOUT"; then
+        bad "two maternal-only hets in a pure-AR gene kept (flags=$(ecol flags 5000 "$EOUT")) — cis is not biallelic"
+    else ok "trio cis hets in a pure-AR gene go down the carrier path (dropped)"; fi
+    case "$(ecol flags 6000 "$EOUT")|$(ecol flags 6100 "$EOUT")" in
+        CompHet\(trans\)*\|CompHet\(trans\)*) ok "one-per-parent hets still CompHet(trans)";;
+        *) bad "trans comp-het broken (flags=$(ecol flags 6000 "$EOUT")|$(ecol flags 6100 "$EOUT"))";; esac
+    [ "$(ecol inheritance 7000 "$DOUT")" = "DN/IF" ] && ok "duo row is DN/IF" \
+        || bad "duo inheritance=$(ecol inheritance 7000 "$DOUT"), expected DN/IF"
+    case ",$(ecol acmg_criteria 7000 "$DOUT")," in *,PM6,*|*,PS2,*) bad "duo DN/IF earned PM6/PS2 ($(ecol acmg_criteria 7000 "$DOUT"))";;
+        *) ok "duo DN/IF earns no PM6 (one parent untested)";; esac
 fi
 
 echo

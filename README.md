@@ -96,6 +96,10 @@ You can **override** which sample is the proband (see [Forcing a proband](#forci
 bash vep_annotate.sh <input.vcf[.gz]> <output.germline.vep.vcf.gz>
 ```
 
+- **Keeps only calls the caller passed** (`FILTER` = `PASS` or `.`), and logs how many it removed.
+  `filtering_r.pl` never reads `FILTER`, so this is the one place it is enforced: DRAGEN/GATK/3billion
+  VCFs carry hard-filtered, `LowQual` and CNN-tranche calls that would otherwise be triaged as real.
+  Sarek `consensus.sh` output is already PASS-only. `KEEP_NONPASS=1` opts out.
 - Splits multiallelic sites **and left-aligns** (`bcftools norm -m-any -f $REF_FASTA`) so downstream
   `chr-pos-ref-alt` keys are unambiguous **and minimal**. Left-alignment is not cosmetic: both custom
   sources below join with `type=exact`, which matches on position *and* allele, and both store indels
@@ -110,6 +114,11 @@ bash vep_annotate.sh <input.vcf[.gz]> <output.germline.vep.vcf.gz>
   nhomalt_joint / FILTER`.
 - `--custom` **ClinVar** (NCBI weekly VCF, chr-prefixed) → `ClinVar_CLNSIG / CLNREVSTAT /
   CLNDN`, kept current independently of the VEP cache's older bundled `CLIN_SIG`.
+
+- **Writes atomically**: VEP writes `<out>.partial.vcf.gz`, which is renamed to the final name only
+  after it indexes cleanly (tabix reads the whole BGZF stream, so a truncated file fails). A run killed
+  mid-way therefore never leaves a file under the `*.germline.vep.vcf.gz` name that resume logic or
+  family discovery could mistake for a finished annotation.
 
 All annotations land inside the `CSQ` INFO field; `filtering_r.pl` resolves them **by
 name** from the CSQ header (no hard-coded column indices).
@@ -126,6 +135,12 @@ MANE gene models are common (MYH11+NDE1, HPDL+MUTYH, COL4A1+COL4A2, SETD1A+STX1B
 position let a panel candidate silently delete a reportable **ACMG-SF incidental** at the same
 position — and corrupted the other gene's comp-het tally by reassigning the row's gene.
 `--lookup` consults still report every annotation.
+
+**Before any gate:** the proband must **carry the ALT** (a `1` among its GT alleles). `norm -m-any`
+turns a `0/2` site into a `0/0` record for ALT1 that still carries ALT1's annotations, and a `./.`
+carries no evidence; both used to flow through every gate and, in a trio, be called de novo. They are
+skipped and counted (`proband non-carrier (0/0, no-call) skipped` in the run log). Lookups are
+sites-only and exempt.
 
 ### Stage 1 — Structural gates (ALL required, AND)
 
@@ -162,7 +177,7 @@ the arm's prose name.
 | REVEL | `REVEL` | `$REVEL_MIN` = 0.644 (ClinGen PP3) |
 | Pangolin (splice) | `Pangolin` | max \|Δscore\| ≥ `$SPLICE_SUPP` = **0.2** for whitelisted **splice consequences** (`splice_*` terms — aligned with the splice PP3/BP7 boundary so there is no dead zone), ≥ `$SPLICE_MIN` = **0.5** for everything else (incl. discovery probes) **and for whitelisted intronic variants beyond the gnomAD footprint with no record** (`gnomad_uncovered()`: HGVSc intron offset > `$GNOMAD_INTRON_PAD` = 10 and `AN = 0` — their rarity was never checked, so they are held to the probe standard, PM2 is withheld and the row is flagged `gnomAD_uncovered`) |
 | ClinVar P/LP | `ClinVar` | `ClinVar_CLNSIG` Pathogenic/Likely_pathogenic (excludes Conflicting & Benign) |
-| PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
+| PS1 / PM5 | `PS1` / `PM5` | ClinVar amino-acid match (≥1★), **true `missense_variant` records only** (a frameshift's `G/X` and a start_lost's `M/V` look like substitutions but are LoF, already counted by a PVS1 tier): **PS1** = a *different* variant giving the same AA change is P/LP, **PM5** = a different change at the same residue is P/LP. A **single-codon in-frame deletion** of the residue also triggers PM5 (a different protein change at the same P/LP residue; tagged `(in-frame del)`). Rescues the variant even when CADD/AM/REVEL miss it; the `clinvar_aa` column carries the detail (and any `(conflicting)` flag). |
 | LoF | `LoF` | LOFTEE `LoF=HC`, or a high-impact truncating consequence (frameshift / stop_gained / splice_donor / splice_acceptor / start_lost) unless LOFTEE downgraded it to `LC`. Covers truncating indels that CADD (SNV-only) and the missense predictors miss. |
 | AR_hom / AR_hem | `AR_hom` / `AR_hem` | **Homozygous or hemizygous, protein-altering** (`missense` / `inframe_*` / `stop_lost` / `start_lost` / `protein_altering_variant`) variant in a gene whose panel **MOI contains AR or XLR** — this includes dual `AD, AR` genes, unlike the *pure*-recessive carrier logic below — with clean allele balance (**AB > 0.75**). A **hemizygous** male call on non-PAR chrX qualifies on the same rationale and is tagged `AR_hem`. Rescued even without in-silico/ClinVar support. *Rationale:* under recessive inheritance a **biallelic (homozygous) genotype in a disease gene is itself pathogenicity evidence**, independent of missense predictors — which are calibrated largely on dominant/heterozygous effects and can miss true recessive alleles. **Restricted to coding changes** (so it doesn't flood on benign homozygous intronic/polypyrimidine variants — those use the Pangolin arm; truncating LoF uses the LoF arm) **and to clean homozygous/hemizygous calls** (AB > 0.75 guards against false-hom artifacts). Already rare (AR freq gate), MANE, in-panel by this point; `BS1`/`BS2`/`BA1` still flag benign-leaning ones. |
 
@@ -185,10 +200,12 @@ All thresholds are single constants at the top of `filtering_r.pl`.
   genes only** — AR/XLR/dual; a purely dominant gene never gets one, so two independent hets are not
   mislabeled comp-het), but the label written to each row **describes that row**: `HOM` on a
   homozygous row, `HEM` on a hemizygous row, `CompHet(trans)` (≥2 het variants phaseable to opposite parents — trio only) or
-  `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton) on the heterozygous rows that constitute it,
+  `CompHet?` (≥2 het, unphaseable — e.g. duo/singleton, or a trio pair involving a de novo / both-parent het) on the heterozygous rows that constitute it,
   or `carrier-only` (see below). A heterozygous variant sitting in a gene that is homozygous for some
   *other* variant is therefore left blank rather than labelled `HOM` — the flag never contradicts the
   row's own `zygosity`. The gene-level verdict still governs which rows survive the carrier drop.
+  In a **trio**, hets that **all** came from the same parent are proven *cis* (one haplotype): they get
+  no flag and go down the carrier path like a solitary het.
 - **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`, **and plain `XL`**)
   are treated as **dominant** for the carrier logic: a **solitary het passes through as a normal
   candidate** (no recessive flag), while a genuine `HOM`/`HEM`/comp-het still gets the recessive flag.
@@ -370,9 +387,9 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Strength **follows the combiner**: `PM2_Supporting` ([ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/)) under the points default, Moderate under `categorical` — see *Combining* below for why the pairing is load-bearing | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when any PVS1 tier fired** — VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect | consequence |
   | **PM5** | Different change — **or a single-codon in-frame deletion** — at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
-  | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean, or a duo-ambiguous `DN/IF`–`DN/IM`. The **dominant-capable MOI gate applies to both paths** (trio and duo): a de novo call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — earns neither PS2 nor PM6 | parental GT + panel MOI |
+  | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean. **Not awarded in a duo** (`DN/IF`–`DN/IM`): absence from the one tested parent is equally inheritance from the untested one, so PM6 fired on about half of every duo's rows. The **dominant-capable MOI gate applies**: a de novo call in a pure-AR gene — or under any panel with `MOI = NA`, e.g. a plain-symbol custom list — earns neither PS2 nor PM6 | parental GT + panel MOI |
   | **PP2** | **Missense** in a gene with low benign-missense variation — gnomAD v4.1.1 missense constraint `mis.oe < 0.6` (MANE; constraint outliers excluded). Counts **independently of PP3** (both are legitimate separate ACMG lines — gene-level intolerance vs variant-level prediction), but **suppressed when BP4 fires** (a benign-predicted variant gets no gene-level pathogenic support). | gnomAD v4.1.1 constraint |
-  | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below); **a Pangolin score ≥ `$SPLICE_SUPP` = 0.2 adds splice `PP3_Supporting`** (SpliceAI-analogous cutoff, [Walker 2023](https://doi.org/10.1016/j.ajhg.2023.06.002)) when no missense grade applies — **never stacked on full PVS1** (a canonical splice LoF is one splicing effect, not two evidence lines), and capped at Supporting (no published Pangolin calibration supports more) | AlphaMissense / REVEL / Pangolin |
+  | **PP3** | Computational damaging, graded Supporting/Moderate/Strong (see below); **a Pangolin score ≥ `$SPLICE_SUPP` = 0.2 adds splice `PP3_Supporting`** (SpliceAI-analogous cutoff, [Walker 2023](https://doi.org/10.1016/j.ajhg.2023.06.002)) when no missense grade applies. **No PP3 of any kind (missense or splice) on either PVS1 tier** — the predictor scores the same null effect PVS1 counts; AlphaMissense scores Met1 substitutions, so a start_lost used to stack `PP3_Strong` on `PVS1_Moderate` (a canonical splice LoF is one splicing effect, not two evidence lines), and capped at Supporting (no published Pangolin calibration supports more) | AlphaMissense / REVEL / Pangolin |
   | **PP5** | This variant is reported pathogenic in ClinVar **with ≥1 review star**. The star gate matches every other ClinVar consumer in the pipeline; without it a single 0-star "no assertion criteria provided" submission (~16% of the P/LP corpus) supplied the criterion that lifts LP to Pathogenic | ClinVar |
 
   **Benign**
@@ -863,7 +880,8 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
   for quick triage. Tighten if noisy.
 - `REVEL ≥ 0.644` matches the ClinGen PP3 calibration. The AlphaMissense rescue uses a
   *score* threshold (`am_score ≥ 0.792`), not the categorical `am_class`.
-- Compound-het *trans* confirmation needs a full trio; duos report `CompHet?`.
+- Compound-het *trans* confirmation needs a full trio; duos report `CompHet?`. A trio proves *cis*
+  (all hets from one parent), which is treated as a carrier, not a comp-het.
 - De-novo calls rely on parent VCF genotypes; a parental no-call (uncovered site) can
   masquerade as de novo — verify against parental depth before reporting.
 - The **cohort recurrent-artifact filter** drops variants that are simultaneously cohort-recurrent and
@@ -890,6 +908,21 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
     a known pathogenic founder allele that survives the Stage-1 ClinVar exemption can auto-classify as
     Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
 - This is a **triage tool to feed manual curation**, not an automated classifier.
+
+## Changelog — 2026-09-29 (audit fixes)
+
+Every item changed rows in synthetic tests (section 11 of `test/test_filtering.sh`, which fails 8
+assertions on the previous commit). Tables built before this are not comparable.
+
+| Change | Before |
+|---|---|
+| **Proband must carry the ALT** | `0/0` (split multiallelic) and `./.` proband records passed every gate; in a trio a `0/0` missense came out `inheritance=DN`, Likely pathogenic |
+| **FILTER=PASS enforced in `vep_annotate.sh`** (`KEEP_NONPASS=1` to opt out) | PASS subsetting was a manual, undocumented pre-step; non-PASS DRAGEN/GATK calls were triaged as real |
+| **Atomic VEP output** | A killed VEP left a valid-header truncated file at the final name; resume guards accepted it and the sample was filtered from part of its variants |
+| **PS1/PM5 need a real missense** | Frameshifts (`G/X`) earned PM5 on top of PVS1; start_lost (`M/V`) earned PS1/PM5 from the 1.5k P/LP Met1 records |
+| **No PP3 on PVS1_Moderate** | start_lost + AlphaMissense stacked `PP3_Strong`: PVS1_Moderate + PM2_Sup + PS1 + PP3_Strong = 11 → **Pathogenic**, undoing the Tayoun cap. Now 3 → VUS |
+| **Trio cis hets are carriers** | Two hets both inherited from one parent were labelled `CompHet?` and escaped the carrier drop |
+| **No PM6 in duos** | Every variant absent from the tested parent earned PM6 (+2): VUS 4 → LP 6 |
 
 ## Changelog — 2026-08
 

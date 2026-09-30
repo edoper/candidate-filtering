@@ -885,9 +885,13 @@ sub acmg_classify {
     # supports nothing under pure-recessive inheritance. The duo path always had
     # this gate; the trio path previously skipped it. Under a panel with MOI=NA
     # (plain-symbol custom list) neither fires, matching the documented PM6 rule.
+    # A duo (DN/IM, DN/IF) earns NEITHER: "absent in the one tested parent" is equally
+    # "inherited from the untested one", so PM6 fired on roughly half of every duo's
+    # rows. PM6 presupposes both parents were tested; the inheritance column still
+    # shows the duo-ambiguous state for the curator.
     if ($v{inh} eq "DN") {                        # trio de novo (relatedness assumed)
         push @P, ($v{gt_clean} ? "PS2" : "PM6") if $v{de_novo_mech};
-    } elsif ($v{inh} =~ m{^DN/} && $v{de_novo_mech}) { push @P, "PM6"; }
+    }
     # PM4 is evidence for a protein-length change; PVS1 already covers the loss-of-
     # function reading of the same event. VEP compound terms make them collide
     # (start_lost&inframe_deletion, frameshift_variant&stop_lost) because $lof_type is
@@ -949,6 +953,10 @@ sub acmg_classify {
         $pp3 = "supporting" if !$pp3;
         $bp4 = "";
     }
+    # No computational PP3 on top of either PVS1 tier: the predictor is scoring the
+    # same null effect PVS1 already counts (ClinGen SVI). AlphaMissense scores Met1
+    # substitutions, so a start_lost otherwise stacked PP3_Strong on PVS1_Moderate.
+    $pp3 = "" if $pvs1 || $pvs1_mod;
     push @P, "PP3_".ucfirst($pp3) if $pp3;
     push @B, "BP4_".ucfirst($bp4) if $bp4;
 
@@ -1584,7 +1592,7 @@ foreach my $proband (@probands) {
     if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
 
     # Run statistics [#9].
-    my %stat = (lines=>0, multiallelic=>0, structural=>0, cohort_dropped=>0, probes=>0);
+    my %stat = (lines=>0, multiallelic=>0, noncarrier=>0, structural=>0, cohort_dropped=>0, probes=>0);
 
     my %emit;            # EMIT pass: unique candidate variants
     my %emit_probe;      # vid -> 1 for splice-discovery probes (counted once) [#5]
@@ -1621,6 +1629,11 @@ foreach my $proband (@probands) {
         # Proband genotype (same for all transcripts of this variant) [#5].
         my ($gt,$dp,$gq,$adr,$ada) = parse_call($fmt,$smp);
         my $zyg = zygosity($gt);
+        # The proband must CARRY the ALT. `bcftools norm -m-any` turns a 0/2 site into a
+        # 0/0 record for ALT1 that still carries ALT1's CSQ, and a no-call (./.) carries
+        # no evidence at all; either would otherwise flow through every gate, and in a
+        # trio be called de novo. Lookups are sites-only and report everything.
+        unless ($LOOKUP || grep { $_ eq "1" } split /[\/|]/, $gt) { $stat{noncarrier}++; next; }
         my $ab  = ($ada ne "" && ($adr+$ada) > 0) ? sprintf("%.2f", $ada/($adr+$ada)) : "";
 
         foreach my $fila (split /,/, $csq) {
@@ -1744,7 +1757,13 @@ foreach my $proband (@probands) {
             my ($paapos) = ($ppos_raw =~ /(\d+)/);
             $paapos = defined $paapos ? $paapos : "";
             my $single_res  = ($ppos_raw =~ /^\d+$/) ? 1 : 0;                       # one residue, no range
-            my $is_missense = ($aa_ref =~ /^[A-Z]$/ && $aa_alt =~ /^[A-Z]$/) ? 1 : 0;
+            # A real missense consequence is required, not just a one-letter pair: VEP writes
+            # a frameshift as "G/X" and a start_lost as "M/V", both of which look like a
+            # substitution. PS1/PM5 are missense-residue criteria; on a frameshift they
+            # stacked PM5 on PVS1, and on a start_lost they undid the PVS1_Moderate cap
+            # (1.5k P/LP Met1 records in the AA resource).
+            my $is_missense = ($aa_ref =~ /^[A-Z]$/ && $aa_alt =~ /^[A-Z]$/ && $aa_alt ne "X"
+                               && $consequence =~ /(?:^|&)missense_variant(?:&|$)/) ? 1 : 0;
             my $is_codondel = (!$is_missense && $single_res && $aa_ref =~ /^[A-Z]$/
                                && $aa_alt =~ /^-?$/ && $consequence =~ /inframe_deletion/) ? 1 : 0;
             if ($CLINVAR_AA_ON && $gene ne "" && $paapos ne "" && ($is_missense || $is_codondel)) {
@@ -2166,7 +2185,15 @@ foreach my $proband (@probands) {
         } elsif (@het >= 2) {
             my $mat = grep {  $gene_var{$g}{$_}{mat} && !$gene_var{$g}{$_}{pat} } @het;
             my $pat = grep { !$gene_var{$g}{$_}{mat} &&  $gene_var{$g}{$_}{pat} } @het;
-            $flag = ($mat && $pat) ? "CompHet(trans)" : "CompHet?";  # phaseable only in trio
+            # With BOTH parents typed, hets that all came from the same parent (every
+            # one maternal-only, or every one paternal-only) are proven cis: one
+            # haplotype, not a biallelic genotype. They get no flag and so fall
+            # through to the carrier path. Anything else unphased (DN, IB, duo) stays
+            # CompHet?.
+            my $cis = $have_m && $have_f && ($mat == @het || $pat == @het);
+            $flag = ($mat && $pat) ? "CompHet(trans)"
+                  : $cis           ? ""
+                  :                  "CompHet?";              # phaseable only in trio
         }
         $gene_flag{$g} = $flag;
     }
@@ -2285,8 +2312,8 @@ foreach my $proband (@probands) {
         print  "  -> $proband.$PANEL_TAG.candidatos\n";
         # structural-pass is reported as UNIQUE VARIANTS (keys %emit) — a per-CSQ-annotation
         # count would tally a variant on two MANE transcripts twice.
-        printf "  variants: %d read | %d multiallelic-skipped | %d structural-pass | %d primary + %d incidental\n",
-               $stat{lines}, $stat{multiallelic}, scalar(keys %emit), $n_prim, $n_inc;
+        printf "  variants: %d read | %d multiallelic-skipped | %d proband non-carrier (0/0, no-call) skipped | %d structural-pass | %d primary + %d incidental\n",
+               $stat{lines}, $stat{multiallelic}, $stat{noncarrier}, scalar(keys %emit), $n_prim, $n_inc;
         printf "  splice discovery: %d probe(s) scored, %d rescued by Pangolin >= %s\n",
                $stat{probes}, $n_probe_kept, $SPLICE_MIN if $SPLICE_PROBE && $stat{probes};
         printf "  cohort_artifact: %d variant(s) dropped (recurrent in >=%d%% of cohort & gnomAD-absent)\n",

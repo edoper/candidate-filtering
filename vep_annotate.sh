@@ -152,20 +152,45 @@ fi
 echo "[vep] Splitting multiallelic sites + left-aligning (bcftools norm -m-any -f)"
 NORM_INPUT="$(mktemp --suffix=.vcf.gz)"
 CLEANUP+=("$NORM_INPUT")
+
+# ── Keep only calls the caller itself passed (FILTER = PASS or '.') ──
+# filtering_r.pl never reads FILTER, so this is the one place it is enforced.
+# DRAGEN/GATK/3billion VCFs carry hard-filtered, LowQual and CNN-tranche calls
+# that would otherwise be triaged as real. Sarek consensus.sh output is already
+# PASS-only (no-op there). KEEP_NONPASS=1 opts out (e.g. to inspect a known call).
+if [[ "${KEEP_NONPASS:-0}" == 1 ]]; then
+    echo "[vep] KEEP_NONPASS=1 — non-PASS records are NOT removed" >&2
+    PASS_ARGS=()
+else
+    N_NONPASS=$(bcftools view -H -e 'FILTER="PASS" || FILTER="."' "$VEP_INPUT" | wc -l)
+    echo "[vep] Removing $N_NONPASS non-PASS record(s) (FILTER not PASS/.; KEEP_NONPASS=1 keeps them)"
+    PASS_ARGS=(-f 'PASS,.')
+fi
 if [ -s "${REF_FASTA:-}" ]; then
-    bcftools norm -m-any -f "$REF_FASTA" "$VEP_INPUT" -Oz -o "$NORM_INPUT"
+    bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
+        | bcftools norm -m-any -f "$REF_FASTA" -Oz -o "$NORM_INPUT"
 else
     echo "[vep] WARNING: REF_FASTA unset or missing — splitting WITHOUT left-alignment." >&2
     echo "[vep]          Indels may miss the gnomAD/ClinVar exact-match join (spurious AC=0 -> PM2)." >&2
     echo "[vep]          Set REF_FASTA in site.env to a chr-named GRCh38 FASTA." >&2
-    bcftools norm -m-any "$VEP_INPUT" -Oz -o "$NORM_INPUT"
+    bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
+        | bcftools norm -m-any -Oz -o "$NORM_INPUT"
 fi
 VEP_INPUT="$NORM_INPUT"
 
 # ── Run VEP ──
+# Written to a .partial name and renamed only after it indexes cleanly, so the final
+# path is never a truncated file: a run killed mid-way (laptop sleep, shutdown) used to
+# leave a valid-header partial VCF that resume guards accepted as "done", and the
+# sample was then filtered from part of its variants. The partial name does not match
+# the *.germline.vep.vcf.gz discovery glob, so filtering can never pick it up either.
+PARTIAL="${OUTPUT%.vcf.gz}.partial.vcf.gz"
+CLEANUP+=("$PARTIAL" "$PARTIAL.tbi")
+rm -f -- "$PARTIAL" "$PARTIAL.tbi"
 "$VEP" \
   --input_file       "$VEP_INPUT" \
-  --output_file      "$OUTPUT" \
+  --output_file      "$PARTIAL" \
+  --stats_file       "${OUTPUT}_summary.html" \
   --vcf \
   --compress_output  bgzip \
   --force_overwrite \
@@ -196,8 +221,15 @@ VEP_INPUT="$NORM_INPUT"
   --custom file="$CLINVAR_VCF",short_name=ClinVar,format=vcf,type=exact,fields=CLNSIG%CLNREVSTAT%CLNDN \
   "${PER_CUSTOM[@]}"
 
-# ── Index output ──
-bcftools index -ft "$OUTPUT" 2>/dev/null || true
+# ── Index, verify, publish ──
+# tabix reads the whole BGZF stream, so it fails on a truncated file; an empty or
+# headerless output is refused too. Only then does the file get its final name.
+tabix -f -p vcf "$PARTIAL" || { echo "ERROR: VEP output failed to index (truncated?): $PARTIAL" >&2; exit 1; }
+HDR=$(bcftools view -h "$PARTIAL")      # not `| grep -q`: SIGPIPE fails it under pipefail
+[[ "$HDR" == *'##INFO=<ID=CSQ'* ]] \
+    || { echo "ERROR: VEP output has no CSQ header: $PARTIAL" >&2; exit 1; }
+mv -f -- "$PARTIAL.tbi" "$OUTPUT.tbi"
+mv -f -- "$PARTIAL" "$OUTPUT"
 
 # (temp cleanup happens in the EXIT trap, success and failure alike)
 
