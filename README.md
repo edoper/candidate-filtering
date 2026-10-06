@@ -5,6 +5,26 @@ annotates a VCF, then keeps rare, gene-panel variants that show damaging evidenc
 (missense pathogenicity, high CADD, splicing impact, or ClinVar) and labels them with
 inheritance and recessive context for **downstream manual curation**.
 
+## What this pipeline does
+
+1. **Annotates** a patient germline VCF (from DRAGEN, GATK, or the `sarek-clinical` 4-caller
+   consensus): keeps FILTER=PASS calls, splits and left-aligns them, then runs Ensembl VEP 115
+   with LOFTEE, REVEL, AlphaMissense, EVE and CADD, plus gnomAD v4.1 frequencies, ClinVar and the
+   PERv1 regions. Each annotated VCF records which ClinVar and gnomAD releases it was joined to.
+2. **Filters** to rare variants on MANE transcripts in an epilepsy gene panel (Genes4Epilepsy,
+   with ClinGen gene-disease validity) that carry at least one line of damaging evidence:
+   predicted missense damage, high CADD, loss of function, splicing impact scored by Pangolin,
+   ClinVar P/LP, or a ClinVar amino-acid match.
+3. **Adds context:** inheritance in trios and duos (de novo, inherited, compound heterozygous,
+   homozygous, hemizygous), a recessive-carrier drop, genotype QC flags and a cohort
+   panel-of-normals for recurrent artifacts. ACMG SF v3.3 genes are always scanned as incidental findings.
+4. **Classifies** each variant with an automated, triage-grade ACMG/AMP class (Tavtigian points
+   system with ClinGen SVI calibrations) and writes one curation-ready `.candidatos` table per
+   proband plus a batch table. Each table opens with a provenance header.
+
+It is a **triage tool for a clinical geneticist**, not an autonomous classifier: gene mechanism
+for PVS1, de novo confirmation, phenotype match and segregation stay with the curator.
+
 > ⚠️ **Patient data never lives in this repository.** The pipeline runs on patient
 > germline VCFs (PHI), but the `.gitignore` is an allow-list that tracks *only* code and
 > non-patient reference config. Do not commit `*.vcf.gz`, `*.candidatos`, or any
@@ -23,10 +43,13 @@ inheritance and recessive context for **downstream manual curation**.
 | `site.sh` | One place for every external path (VEP, plugin data, Pangolin, ClinVar AA tables). Override in an untracked `site.env` — see [Setup](#setup). |
 | `test/test_filtering.sh` | Regression test on synthetic data: self-tests, reference-file integrity, and end-to-end gating. No VEP, no data, no GPU, ~5s. |
 | `LICENSE` | MIT, with a note that this is a triage tool requiring professional review. |
-| `g4e-2026.txt` | Gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. Source: **Genes4Epilepsy v2026-03** (bahlolab/Genes4Epilepsy), 1078 genes; provenance header in the file. |
+| `g4e.txt` | Default gene panel: `gene⇥Association⇥MOI⇥GDV`. Restricts output to panel genes; supplies MOI. Built by `update_panel.sh` from **Genes4Epilepsy v2026-09** (1096 genes; 26 with only Limited/Disputed/Refuted ClinGen support removed → 1070) and the **ClinGen gene-validity export of 2026-10-06**. `GDV` = `CLASS\|disease\|MONDO\|MOI\|date` of one ClinGen assertion, or `NOT_CURATED`. The header records both versions, every override and every removed gene. |
+| `update_panel.sh` | Rebuilds `g4e.txt` from the newest Genes4Epilepsy release + today's ClinGen export + `panel_overrides.tsv`. **Run every March and September** (filtering warns once the panel's ClinGen snapshot is > 7 months old). |
+| `panel_overrides.tsv` | Curated panel corrections that survive every refresh (MOI fixes, KEEP, REMOVE), each with its evidence. |
+| `update_clinvar.sh` | Refreshes ClinVar from one NCBI release: the chr-named VEP custom VCF **and** the PS1/PM5 amino-acid tables, dated side by side under `$VEP_REFS/clinvar/`. |
 | `typevar.txt` | Consequence whitelist (atomic terms; matched per `&`-separated sub-term). |
 | `mane-plus-clinical-names.txt` | MANE Select + MANE Plus Clinical transcript IDs; only these transcripts are considered. |
-| `acmg_sf_v3.2.txt` | ACMG SF v3.2 secondary-findings genes (81): `gene⇥condition⇥MOI⇥report_category`. Always scanned. |
+| `acmg_sf_v3.3.txt` | ACMG SF v3.3 secondary-findings genes (84; v3.2 + ABCD1, CYP27A1, PLN): `gene⇥condition⇥MOI⇥report_category`. Always scanned. |
 | `gnomad-mis-constraint.txt` | gnomAD v4.1.1 missense constraint per MANE gene: `gene⇥mis.oe⇥mis.z⇥flags`. Drives the ACMG **PP2** criterion. |
 
 ---
@@ -148,7 +171,7 @@ sites-only and exempt.
 |------|--------|------|
 | MANE transcript | `mane-plus-clinical-names.txt` | CSQ `Feature` ∈ MANE set |
 | Consequence | `typevar.txt` | consequence split on `&`; kept if **any** sub-term is whitelisted |
-| Gene panel | `g4e-2026.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
+| Gene panel | `g4e.txt` (default) or a custom genes-of-interest file | CSQ `SYMBOL` ∈ panel |
 | Rarity (MOI-aware) | gnomAD joint AC/AN | AF = AC/AN×100 ≤ threshold: **dominant `$FREQ_AD`=0.01%**, **recessive `$FREQ_AR`=1.0%** (MOI contains AR/XLR) |
 
 > **ClinVar exemption.** A panel-gene variant classified **Pathogenic/Likely-pathogenic in ClinVar
@@ -209,8 +232,8 @@ All thresholds are single constants at the top of `filtering_r.pl`.
 - **Dual-inheritance genes** (panel MOI lists **both** AD and AR, e.g. `AD, AR`, **and plain `XL`**)
   are treated as **dominant** for the carrier logic: a **solitary het passes through as a normal
   candidate** (no recessive flag), while a genuine `HOM`/`HEM`/comp-het still gets the recessive flag.
-  Plain `XL` is the Genes4Epilepsy vocabulary for an X-linked gene with no XLD/XLR split — **72 of the
-  1078** g4e-2026 genes, including CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX, SLC6A8 and FLNA.
+  Plain `XL` is the Genes4Epilepsy vocabulary for an X-linked gene with no XLD/XLR split — **73 of the
+  1070** g4e genes, including CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX, SLC6A8 and FLNA.
   Before 2026-08 it matched *neither* MOI predicate, so those genes silently got no HOM/CompHet flag,
   no `AR_hom` rescue, and the strict dominant AF ceiling. `XLR` / `XLD` keep their specific meanings. This
   prevents dropping a dominant-acting variant (e.g. a LoF) just because the gene *also* has a
@@ -339,6 +362,22 @@ A per-proband **run summary** prints counts (read / multiallelic-skipped / struc
 / candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
 
 ### Output columns (`<proband>.<panel>.candidatos`, TSV)
+
+Every table (per proband, batch, and `Lookup.*` consult) opens with `## ` provenance lines, then the
+column header:
+
+```
+## candidate-filtering git=<sha> run=<UTC time> combiner=points
+## panel=g4e.txt version=Genes4Epilepsy v2026-09 clingen_fileDate=2026-10-06
+## acmg_sf=acmg_sf_v3.3
+## annotation VEP=v115.1 cache=115_GRCh38 gencode=GENCODE 49 gnomAD=gnomAD.joint.v4.1.mane.all.vcf.gz
+## ClinVar annotation_fileDate=2026-10-04 ps1_pm5_fileDate=2026-10-04
+```
+
+ClinVar `annotation_fileDate` is `unknown` for VCFs annotated before 2026-10-06 (no stamp in their
+header). To load a table elsewhere, skip the leading `##` lines rather than using a `#` comment
+character (free-text columns can contain `#`): R `read.delim(f, skip = sum(startsWith(readLines(f), "##")))`,
+shell `grep -v '^##' f`.
 
 `chr, start, end, ref, alt, gene, strand, consequence, hgvs,
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
@@ -470,9 +509,9 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 
 ---
 
-## Secondary findings (ACMG SF v3.2)
+## Secondary findings (ACMG SF v3.3)
 
-The **81 ACMG SF v3.2 genes** (`acmg_sf_v3.2.txt`) are **always** scanned, independent of the
+The **84 ACMG SF v3.3 genes** (`acmg_sf_v3.3.txt`) are **always** scanned, independent of the
 candidate `-l`/`--list` panel, with a **stricter** gate than candidates. Findings are written into
 the **same** `.candidatos` output, flagged **`GDV = Incidental`** (with `Association`/`MOI` from the
 ACMG table and `kept_by` = the evidence tier). Curators split primary vs secondary on the GDV column.
@@ -584,11 +623,11 @@ tabixed** — the annotation step asserts they exist and fails early if not.
 ```bash
 mkdir -p $VEP_REFS/gnomAD_min $VEP_REFS/clinvar
 
-# ClinVar (small, ~100 MB) — add the 'chr' prefix the pipeline expects
-wget https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz
-bcftools annotate --rename-chrs <(for i in $(seq 1 22) X Y MT; do echo -e "$i\tchr$i"; done) \
-  clinvar.vcf.gz -Oz -o $VEP_REFS/clinvar/clinvar.chr.vcf.gz
-tabix -p vcf $VEP_REFS/clinvar/clinvar.chr.vcf.gz
+# ClinVar (~200 MB): downloads the current NCBI weekly release, checks its md5, writes the
+# chr-named custom VCF AND the PS1/PM5 tables (step 0.6) from that same release, dated:
+#   $VEP_REFS/clinvar/clinvar.chr.<fileDate>.vcf.gz  <- clinvar.chr.vcf.gz (symlink)
+#   $VEP_REFS/clinvar/aa-<fileDate>/                 <- aa (symlink; set CLINVAR_AA_DIR to it)
+bash update_clinvar.sh            # or: bash update_clinvar.sh /path/to/clinvar.vcf.gz
 
 # gnomAD v4.1 joint frequencies, reduced to the fields the filter reads
 #   (AC_joint, AN_joint, AF_joint, nhomalt_joint, FILTER) — the full release is ~2 TB, so
@@ -608,9 +647,16 @@ $CLINVAR_AA_DIR/clinvar.MANE_missense.PLP.tsv
 $CLINVAR_AA_DIR/clinvar.MANE_missense.BLB.tsv
 ```
 
-Build them by splitting the ClinVar VCF's MANE missense records by clinical significance, keyed by
-`gene:protein_position`. **If `CLINVAR_AA_DIR` is unset or the files are missing, filtering still
-runs normally and PS1/PM5 are simply skipped** with a warning — so you can defer this.
+`update_clinvar.sh` (step 0.5) builds them from **the same ClinVar VCF** VEP annotates with: P/LP
+and B/LB missense SNVs (first CLNSIG term; VUS, conflicting and somatic-only records excluded) are
+mapped to the MANE Select protein by VEP, giving gene, residue, reference and alternate amino acid.
+A `RELEASE` file beside them records the ClinVar fileDate, which every `.candidatos` header reports.
+Point `CLINVAR_AA_DIR` at `$VEP_REFS/clinvar/aa` in `site.env`. **If `CLINVAR_AA_DIR` is unset or the
+files are missing, filtering still runs normally and PS1/PM5 are simply skipped** with a warning.
+
+> **Annotation and PS1/PM5 releases must match.** A VCF annotated before a ClinVar refresh still
+> carries the old ClinVar columns; its table header then shows both dates and a `## WARNING` line.
+> Re-annotate (overnight) to align them.
 
 ### 0.6b — PERv1 regions (optional — enables ACMG PM1)
 
@@ -706,7 +752,7 @@ Every value-taking flag also accepts the `--flag=value` form.
 
 | Flag | Value | What it does |
 |------|-------|--------------|
-| `-l`, `--list` | genes file | Candidate-gene panel, replacing `g4e-2026.txt`. **This is the only way to set the panel**, and it also sets the output `<panel>` tag. |
+| `-l`, `--list` | genes file | Candidate-gene panel, replacing `g4e.txt`. **This is the only way to set the panel**, and it also sets the output `<panel>` tag. |
 | `-v`, `--variant` | variant | Single-variant consult; **repeatable** for several variants. Coords or `ENST…` HGVS. |
 | `--lookup` | annotated VCF | Consult a pre-annotated `*.germline.vep.vcf.gz` directly. Mutually exclusive with `-v`. |
 | `-p`, `--proband` | sample base-name | Force a sample as proband, overriding filename auto-discovery. **Repeatable.** |
@@ -722,7 +768,7 @@ Every value-taking flag also accepts the `--flag=value` form.
 
 ### Custom gene list (genes of interest)
 
-By default the panel is `g4e-2026.txt`. To restrict to a different gene set, pass a
+By default the panel is `g4e.txt`. To restrict to a different gene set, pass a
 genes-of-interest file (one gene symbol per line; `#` comments and blanks ignored) with
 `-l`/`--list` — it is forwarded to both passes:
 
@@ -909,6 +955,21 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
     Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
 - This is a **triage tool to feed manual curation**, not an automated classifier.
 
+## Changelog — 2026-10-06 (resource currency + provenance)
+
+| Change | Before |
+|---|---|
+| **Panel → Genes4Epilepsy v2026-09** (`g4e-2026.txt` renamed `g4e.txt`; the version lives in the header) | v2026-03: 18 genes missing (ATG12, CECR2, CHASERR, CMIP, DMAP1, DSCAM, KLHL15, NKX2-1, PREP, PSMF1, RLIM, SLC20A2, SPTBN5, STAT2, SUPT4H1, TRAPPC9, TXNIP, ZNF536) |
+| **GDV rebuilt from ClinGen** (`CLASS\|disease\|MONDO\|MOI\|date`, `NOT_CURATED`) | Disease + MONDO carried over from g4e-2025 for 93 of 1078 genes, no classification level; 313 genes with Definitive/Strong ClinGen curations showed `NO_GDV` |
+| **26 genes removed** whose only relevant, MOI-compatible ClinGen evidence is Limited/Disputed/Refuted (incl. **TNK2**, epilepsy Refuted 2026-07-21; listed in the panel header) | Reported like any other panel gene |
+| **MOI fixes** (`panel_overrides.tsv`): NRXN1 → `AD, AR`, IDH2 → `AD`, TREX1 → `AD, AR`; AFG3L2 reviewed, kept `AR` | NRXN1 heterozygous LoF variants were dropped as AR carriers |
+| **ClinVar 2026-10-04** for annotation **and** PS1/PM5 (`update_clinvar.sh`) | VCF 2026-05-23; PS1/PM5 tables from a 2026-02 `variant_summary` build |
+| **Provenance header** in every `.candidatos` | Nothing in a delivered table said which code or data produced it |
+| **ACMG SF v3.3** (84 genes) | v3.2, 81 genes (ABCD1, CYP27A1, PLN missing) |
+
+**Re-run needed:** filtering only (cheap) for open cases, to pick up the 18 new genes, the NRXN1/IDH2/TREX1
+MOI and the 26 removals. Re-annotation (overnight) is needed only to move existing VCFs onto ClinVar 2026-10-04.
+
 ## Changelog — 2026-09-29 (audit fixes)
 
 Every item changed rows in synthetic tests (section 11 of `test/test_filtering.sh`, which fails 8
@@ -981,10 +1042,10 @@ this repo's MIT licence and remain subject to their sources' terms:
 
 | File | Source | Terms |
 |---|---|---|
-| `g4e-2026.txt` | [Genes4Epilepsy](https://github.com/bahlolab/Genes4Epilepsy) v2026-03 (provenance header in the file; GDV column carried over from the prior release) | No explicit upstream licence — redistributed with attribution; cite Oliver et al., *Epilepsia* 2023 |
+| `g4e.txt` | [Genes4Epilepsy](https://github.com/bahlolab/Genes4Epilepsy) v2026-09 + [ClinGen gene-disease validity](https://search.clinicalgenome.org/kb/gene-validity) export 2026-10-06 (both recorded in the file header) | Genes4Epilepsy: no explicit upstream licence, redistributed with attribution (cite Oliver et al., *Epilepsia* 2023). ClinGen: CC0 |
 | `gnomad-mis-constraint.txt` | gnomAD v4.1.1 constraint metrics (Broad Institute) | gnomAD data are released free of restriction ([terms](https://gnomad.broadinstitute.org/policies)); cite the gnomAD flagship paper |
 | `mane-plus-clinical-names.txt` | NCBI/EMBL-EBI MANE (Select + Plus Clinical transcript list) | Public domain (US Government work / EMBL-EBI open data) |
-| `acmg_sf_v3.2.txt` | Gene list transcribed from ACMG SF v3.2 (Miller et al., *Genet Med* 2023) | Factual gene list; cite the ACMG policy statement |
+| `acmg_sf_v3.3.txt` | Gene list transcribed from ACMG SF v3.2 (Miller et al., *Genet Med* 2023) + the v3.3 additions (Lee et al., *Genet Med* 2025) | Factual gene list; cite the ACMG policy statement |
 | `typevar.txt` | Ensembl/Sequence Ontology consequence terms | Open |
 
 The heavyweight annotation resources (VEP cache, gnomAD VCF, ClinVar, CADD, REVEL, AlphaMissense,

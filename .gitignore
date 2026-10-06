@@ -22,16 +22,19 @@
 !parse_pangolin.pl
 !run_filtering.sh
 !vep_annotate.sh
+!update_panel.sh
+!update_clinvar.sh
 
 # Tests (synthetic data only, generated at runtime into a temp dir)
 !test/
 !test/test_filtering.sh
 
 # Non-patient reference / config
-!g4e-2026.txt
+!g4e.txt
+!panel_overrides.tsv
 !typevar.txt
 !mane-plus-clinical-names.txt
-!acmg_sf_v3.2.txt
+!acmg_sf_v3.3.txt
 !gnomad-mis-constraint.txt
 
 # Explicitly DO NOT track (already covered by "*", listed here as documentation

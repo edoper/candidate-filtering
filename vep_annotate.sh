@@ -153,6 +153,18 @@ echo "[vep] Splitting multiallelic sites + left-aligning (bcftools norm -m-any -
 NORM_INPUT="$(mktemp --suffix=.vcf.gz)"
 CLEANUP+=("$NORM_INPUT")
 
+# ── Provenance stamped into the output header (read back by filtering_r.pl) ──
+# VEP's own ##VEP line names the CACHE's ClinVar, not the custom ClinVar VCF joined
+# below, so the custom resources' releases are recorded explicitly.
+PROV_HDR="$(mktemp)"
+CLEANUP+=("$PROV_HDR")
+CLINVAR_DATE=$(bcftools view -h "$CLINVAR_VCF" | sed -n 's/^##fileDate=//p' | head -1)
+CF_GIT=$(git -C "$CF_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
+[[ -n "$(git -C "$CF_REPO" status --porcelain --untracked-files=no 2>/dev/null)" ]] && CF_GIT="$CF_GIT-dirty"
+{ echo "##cf_ClinVar_fileDate=${CLINVAR_DATE:-unknown}"
+  echo "##cf_gnomAD=$(basename "$GNOMAD_VCF")"
+  echo "##cf_annotate_git=$CF_GIT"; } > "$PROV_HDR"
+
 # ── Keep only calls the caller itself passed (FILTER = PASS or '.') ──
 # filtering_r.pl never reads FILTER, so this is the one place it is enforced.
 # DRAGEN/GATK/3billion VCFs carry hard-filtered, LowQual and CNN-tranche calls
@@ -177,13 +189,15 @@ if [ -s "${REF_FASTA:-}" ]; then
     echo "[vep] Removing $N_OFFREF record(s) on contigs absent from REF_FASTA (alt/decoy)"
     PASS_ARGS+=(-T "$REF_TARGETS")
     bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
-        | bcftools norm -m-any -f "$REF_FASTA" -Oz -o "$NORM_INPUT"
+        | bcftools norm -m-any -f "$REF_FASTA" -Ou \
+        | bcftools annotate -h "$PROV_HDR" -Oz -o "$NORM_INPUT"
 else
     echo "[vep] WARNING: REF_FASTA unset or missing — splitting WITHOUT left-alignment." >&2
     echo "[vep]          Indels may miss the gnomAD/ClinVar exact-match join (spurious AC=0 -> PM2)." >&2
     echo "[vep]          Set REF_FASTA in site.env to a chr-named GRCh38 FASTA." >&2
     bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
-        | bcftools norm -m-any -Oz -o "$NORM_INPUT"
+        | bcftools norm -m-any -Ou \
+        | bcftools annotate -h "$PROV_HDR" -Oz -o "$NORM_INPUT"
 fi
 VEP_INPUT="$NORM_INPUT"
 

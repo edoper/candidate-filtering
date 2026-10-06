@@ -1,4 +1,5 @@
-# ACMG SF v3.2 secondary-findings genes (81 genes).
+# ACMG SF v3.3 secondary-findings genes (84 genes): v3.2 (Miller et al., Genet Med 2023; 81 genes)
+#   plus the three v3.3 additions ABCD1, CYP27A1, PLN (Lee et al., Genet Med 2025).
 # Columns: gene <tab> condition <tab> MOI <tab> report_category
 #   report_category: ALL_PLP        = report all P/LP per the inclusion gate
 #                    TRUNCATING_ONLY = only truncating (LoF) variants (TTN)
@@ -85,3 +86,6 @@ TSC2	Tuberous sclerosis 2	AD	ALL_PLP
 VHL	Von Hippel-Lindau syndrome	AD	ALL_PLP
 WT1	Wilms tumor / WT1 disorder	AD	ALL_PLP
 ATP7B	Wilson disease	AR	ALL_PLP
+ABCD1	X-linked adrenoleukodystrophy	XL	ALL_PLP
+CYP27A1	Cerebrotendinous xanthomatosis	AR	ALL_PLP
+PLN	Dilated / arrhythmogenic cardiomyopathy (PLN)	AD	ALL_PLP

@@ -1,0 +1,10 @@
+# Curated overrides applied by update_panel.sh on top of Genes4Epilepsy + ClinGen.
+# They survive every refresh; each one must carry its evidence/reason.
+# Columns: gene <tab> action <tab> value <tab> reason
+#   MOI     replace the Genes4Epilepsy inheritance (panel vocabulary: AD, AR, "AD, AR", XL, XLD, XLR, MT)
+#   KEEP    keep the gene even if the ClinGen removal rule would drop it
+#   REMOVE  drop the gene regardless of ClinGen (value = short label for the header)
+NRXN1	MOI	AD, AR	ClinGen complex neurodevelopmental disorder AD Definitive (2019); biallelic Pitt-Hopkins-like 2 is AR. Pure AR dropped heterozygous LoF as carriers.
+IDH2	MOI	AD	D-2-hydroxyglutaric aciduria type II is dominant gain-of-function (p.Arg140); ClinGen mitochondrial disease AD Definitive (2023).
+TREX1	MOI	AD, AR	ClinGen TREX1-related type 1 interferonopathy Definitive for BOTH AR (2024) and AD (2026-01).
+AFG3L2	MOI	AR	Reviewed 2026-10: ClinGen lumps AD SCA28/optic atrophy with AR SPAX5 as semidominant; the epilepsy/PME phenotype is the AR form, so AR is kept deliberately.

@@ -51,26 +51,30 @@ selftest --selftest-cohort "cohort self-test"
 # ─────────────── 3: reference data integrity ───────────────
 # These files ARE the clinical behaviour — a truncated download silently changes results.
 echo "== 3. tracked reference data =="
-n=$(grep -vcE '^#|^$' g4e-2026.txt);            [ "$n" -gt 500 ]  && ok "panel: $n genes"            || bad "panel too small ($n)"
-n=$(awk -F'\t' '!/^#/ && NF==4' g4e-2026.txt | wc -l)
+n=$(grep -vcE '^#|^$' g4e.txt);            [ "$n" -gt 500 ]  && ok "panel: $n genes"            || bad "panel too small ($n)"
+n=$(awk -F'\t' '!/^#/ && NF==4' g4e.txt | wc -l)
 [ "$n" -gt 500 ] && ok "panel: $n rows have the 4 expected columns" || bad "panel column shape ($n 4-col rows)"
 n=$(grep -c . typevar.txt);                     [ "$n" -ge 8 ]    && ok "consequence whitelist: $n"  || bad "typevar too small ($n)"
 n=$(grep -c '^ENST' mane-plus-clinical-names.txt); [ "$n" -gt 15000 ] && ok "MANE transcripts: $n"   || bad "MANE list too small ($n)"
-n=$(grep -vcE '^#|^$' acmg_sf_v3.2.txt);        [ "$n" -eq 81 ]   && ok "ACMG SF genes: $n"          || bad "ACMG SF list wrong size ($n, expected 81)"
+n=$(grep -vcE '^#|^$' acmg_sf_v3.3.txt);        [ "$n" -eq 84 ]   && ok "ACMG SF v3.3 genes: $n"     || bad "ACMG SF list wrong size ($n, expected 84)"
 n=$(grep -c . gnomad-mis-constraint.txt);       [ "$n" -gt 15000 ] && ok "missense constraint: $n"   || bad "constraint table too small ($n)"
+
+# .candidatos tables open with "## " provenance lines; table assertions read a copy
+# without them, so the column header is line 1 as before.
+body() { [ -n "${1:-}" ] && [ -e "$1" ] || return 0; grep -v '^##' "$1" > "$1.tsv"; printf '%s\n' "$1.tsv"; }
 
 # ─────────────── 4: end-to-end gating on synthetic data ───────────────
 echo "== 4. end-to-end (synthetic annotated VCF) =="
 TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
-for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$TD/$f"
 done
 MANE_TX=$(grep -m1 '^ENST' "$REPO/mane-plus-clinical-names.txt" | cut -f1)
 # A DOMINANT panel gene for the keep-case: a solitary het in a pure AR gene is
 # deliberately dropped as a carrier, so an AR gene would test the wrong thing.
-PANEL_GENE=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1; exit}' "$REPO/g4e-2026.txt")
-AR_GENE=$(awk -F'\t' '!/^#/ && $3=="AR" {print $1; exit}' "$REPO/g4e-2026.txt")
+PANEL_GENE=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1; exit}' "$REPO/g4e.txt")
+AR_GENE=$(awk -F'\t' '!/^#/ && $3=="AR" {print $1; exit}' "$REPO/g4e.txt")
 [ -n "$PANEL_GENE" ] && [ -n "$AR_GENE" ] || { echo "  FAIL  could not pick AD/AR genes from the panel"; exit 1; }
 
 CSQ='SYMBOL|STRAND|Feature|MANE_SELECT|Consequence|HGVSc|HGVSp|cDNA_position|Amino_acids|Protein_position|REVEL|EVE_CLASS|EVE_SCORE|CADD_PHRED|am_class|am_pathogenicity|LoF|LoF_filter|LoF_flags|gnomADmin_AC_joint|gnomADmin_AN_joint|gnomADmin_AF_joint|gnomADmin_nhomalt_joint|gnomADmin_FILTER|ClinVar_CLNSIG|ClinVar_CLNREVSTAT|ClinVar_CLNDN'
@@ -82,7 +86,7 @@ csq() { # <gene> <consequence> <cadd> <am_score> <ac> <an> [clnsig] [clnrevstat]
 STAR1='criteria_provided,_single_submitter'
 # A dual-inheritance gene (MOI lists both AD and AR): its solitary hets pass through
 # as dominant candidates, which is what the recessive-flag row-consistency check needs.
-DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO/g4e-2026.txt")
+DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO/g4e.txt")
 [ -n "$DUAL_GENE" ] || { echo "  FAIL  no dual-inheritance gene in the panel"; exit 1; }
 {
   echo '##fileformat=VCFv4.2'
@@ -129,11 +133,22 @@ IN=$(ls "$TD"/TESTFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
 : > "${IN%.pangolin_input.csv}.pangolin.tsv"
 ( cd "$TD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pass2.log 2>&1 )
 
-OUT=$(ls "$TD"/TESTFAM-P.*.candidatos 2>/dev/null | head -1)
+RAW_OUT=$(ls "$TD"/TESTFAM-P.*.candidatos 2>/dev/null | head -1)
+OUT=$(body "$RAW_OUT")
 if [ -z "$OUT" ]; then
     bad "no .candidatos produced"; tail -15 "$TD/pass2.log" | sed 's/^/      /'
 else
-    ok "produced $(basename "$OUT")"
+    ok "produced $(basename "$RAW_OUT")"
+    # Provenance header: code version, panel + ClinGen date, SF list, annotation and
+    # PS1/PM5 releases. The synthetic VCF carries no vep_annotate.sh stamp -> unknown.
+    grep -q '^## candidate-filtering git=' "$RAW_OUT" && ok "provenance: git SHA recorded" || bad "provenance: no git line"
+    grep -q '^## panel=g4e.txt version=Genes4Epilepsy v[0-9]\{4\}-[0-9]\{2\} clingen_fileDate=[0-9-]\{10\}' "$RAW_OUT" \
+        && ok "provenance: panel version + ClinGen date recorded" || bad "provenance: panel line missing/malformed"
+    grep -q '^## acmg_sf=acmg_sf_v3.3$' "$RAW_OUT" && ok "provenance: ACMG SF v3.3" || bad "provenance: SF line missing"
+    grep -q '^## ClinVar annotation_fileDate=unknown ps1_pm5_fileDate=none$' "$RAW_OUT" \
+        && ok "provenance: ClinVar releases recorded (unstamped VCF -> unknown)" || bad "provenance: ClinVar line wrong"
+    [ "$(grep -v '^##' "$RAW_OUT" | head -1 | cut -f1)" = "$(head -1 "$OUT" | cut -f1)" ] \
+        && ok "column header is the first non-provenance line" || bad "header misplaced after provenance"
     kept=$(awk -F'\t' 'NR>1{print $2}' "$OUT" | sort -u | tr '\n' ' ')
     nrow=$(awk 'NR>1' "$OUT" | wc -l)
     grep -q "$PANEL_GENE" "$OUT" && ok "rare damaging panel variant KEPT ($PANEL_GENE)" \
@@ -191,7 +206,7 @@ fi
 echo "== 5. consult mode (--lookup) and BP7 =="
 if [ -n "${OUT:-}" ]; then
     TSV="${IN%.pangolin_input.csv}.pangolin.tsv"
-    before=$(md5sum "$OUT" | cut -d' ' -f1)
+    before=$(md5sum "$RAW_OUT" | cut -d' ' -f1)
     ( cd "$TD" && CLINVAR_AA_DIR= REF_FASTA= \
         perl filtering_r.pl --lookup TESTFAM-P.germline.vep.vcf.gz >lookup.log 2>&1 )
     LK=$(ls "$TD"/Lookup.TESTFAM-P.*.candidatos 2>/dev/null | head -1)
@@ -199,7 +214,7 @@ if [ -n "${OUT:-}" ]; then
                  || { bad "--lookup produced no Lookup.* output"; tail -8 "$TD/lookup.log" | sed 's/^/      /'; }
     # The consult must never clobber the cohort table: --lookup derives its tag
     # from the input VCF basename, which IS the proband name.
-    [ "$(md5sum "$OUT" | cut -d' ' -f1)" = "$before" ] \
+    [ "$(md5sum "$RAW_OUT" | cut -d' ' -f1)" = "$before" ] \
         && ok "cohort candidatos table left untouched by --lookup" \
         || bad "--lookup overwrote $(basename "$OUT")"
 
@@ -222,9 +237,12 @@ fi
 
 # ─────────────── 6: batch-level table ───────────────
 echo "== 6. batch-level table =="
-BATCH=$(ls "$TD"/batch.*.candidatos 2>/dev/null | head -1)
+RAW_BATCH=$(ls "$TD"/batch.*.candidatos 2>/dev/null | head -1)
+BATCH=$(body "$RAW_BATCH")
 if [ -n "$BATCH" ]; then
-    ok "wrote $(basename "$BATCH")"
+    ok "wrote $(basename "$RAW_BATCH")"
+    grep -q '^## candidate-filtering git=' "$RAW_BATCH" && ok "batch table carries the provenance header" \
+                                                       || bad "batch table has no provenance header"
     [ "$(head -1 "$BATCH" | cut -f1)" = "sample" ] \
         && ok "batch table's first column is 'sample'" \
         || bad "batch table's first column is '$(head -1 "$BATCH" | cut -f1)', expected 'sample'"
@@ -248,14 +266,14 @@ fi
 # the synthetic autosomal fixture above cannot reach.
 echo "== 7. haploid GT, X-linked MOI, PP5 star gate, per-gene collapse =="
 XD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD"' EXIT
-for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$XD/$f"
 done
 # A plain "XL" gene — the g4e vocabulary for X-linked genes with no XLD/XLR split.
-XL_GENE=$(awk -F'\t' '!/^#/ && $3=="XL" {print $1; exit}' "$REPO/g4e-2026.txt")
+XL_GENE=$(awk -F'\t' '!/^#/ && $3=="XL" {print $1; exit}' "$REPO/g4e.txt")
 TX2=$(grep -m2 '^ENST' "$REPO/mane-plus-clinical-names.txt" | tail -1 | cut -f1)
-GENE_B=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1}' "$REPO/g4e-2026.txt" | sed -n 2p)
+GENE_B=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1}' "$REPO/g4e.txt" | sed -n 2p)
 [ -n "$XL_GENE" ] && [ -n "$GENE_B" ] || { echo "  FAIL  could not pick XL/second AD gene"; exit 1; }
 NOSTAR='no_assertion_criteria_provided'
 csq2() { # like csq() but with an explicit transcript as $9
@@ -302,7 +320,7 @@ xhdr() {
 XIN=$(ls "$XD"/XFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
 [ -n "$XIN" ] && : > "${XIN%.pangolin_input.csv}.pangolin.tsv"
 ( cd "$XD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >xpass2.log 2>&1 )
-XOUT=$(ls "$XD"/XFAM-P.*.candidatos 2>/dev/null | head -1)
+XOUT=$(body "$(ls "$XD"/XFAM-P.*.candidatos 2>/dev/null | head -1)")
 
 if [ -z "$XOUT" ]; then
     bad "section 7 produced no candidatos"; tail -15 "$XD/xpass2.log" | sed 's/^/      /'
@@ -344,11 +362,11 @@ fi
 # ─────────── 8: splice discovery, ACMG-SF scoring, PM2 strength, PS2 scope ───────────
 echo "== 8. splice discovery, SF scoring, PM2 strength, PS2 scope =="
 SD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD"' EXIT
-for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$SD/$f"
 done
-SF_GENE=$(awk -F'\t' '!/^#/ && NF{print $1}' "$REPO/acmg_sf_v3.2.txt" | grep -vx TTN | head -1)
+SF_GENE=$(awk -F'\t' '!/^#/ && NF{print $1}' "$REPO/acmg_sf_v3.3.txt" | grep -vx TTN | head -1)
 # csq with an explicit HGVSc, so an intron offset (c.100+50) can be expressed.
 csq3() { # <gene> <consequence> <cadd> <am> <ac> <an> <hgvsc>
   printf '%s|1|%s|%s|%s|%s|p.Gly34Ser|100|G/S|34||||%s|likely_pathogenic|%s||||%s|%s|0|0|PASS|||' \
@@ -408,7 +426,8 @@ else
     STSV="${SIN%.pangolin_input.csv}.pangolin.tsv"
     { printf 'chr2-1000-G-A\t0.90\n'; printf 'chr2-1100-G-A\t0.05\n'; printf 'chr2-1400-G-A\t0.80\n'; } > "$STSV"
     ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >spass2.log 2>&1 )
-    SOUT=$(ls "$SD"/SPFAM-P.*.candidatos 2>/dev/null | head -1)
+    SRAW=$(ls "$SD"/SPFAM-P.*.candidatos 2>/dev/null | head -1)
+    SOUT=$(body "$SRAW")
     if [ -z "$SOUT" ]; then
         bad "section 8: no candidatos"; tail -10 "$SD/spass2.log" | sed 's/^/      /'
     else
@@ -440,7 +459,7 @@ else
         # not "unobserved". Re-run with --probe-uncovered so 1300 (AN=0) is probed, and
         # score it high enough to be rescued.
         printf 'chr2-1300-G-A\t0.95\n' >> "$STSV"
-        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl --probe-uncovered >spass3.log 2>&1 )
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl --probe-uncovered >spass3.log 2>&1 ); body "$SRAW" >/dev/null
         upm=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==1300{print $h["acmg_criteria"]}' "$SOUT")
         if [ -n "$(awk -F'\t' 'NR>1 && $2==1300' "$SOUT")" ]; then
             ok "--probe-uncovered widens the probe set past the gnomAD footprint"
@@ -456,8 +475,8 @@ else
 
         # The categorical combiner survives behind ACMG_COMBINER, with PM2 coupled
         # back to Moderate so ACMG 2015 Table 5 still reaches LP on PVS1+PM2.
-        rm -f "$SOUT"
-        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical perl filtering_r.pl >scat.log 2>&1 )
+        rm -f "$SRAW" "$SOUT"
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical perl filtering_r.pl >scat.log 2>&1 ); body "$SRAW" >/dev/null
         catc=$(scol acmg_criteria 3000); catk=$(scol acmg_class 3000)
         case ",$catc," in *,PM2,*) ok "categorical combiner couples PM2 back to Moderate";;
                           *) bad "categorical run lost the PM2-Moderate coupling (criteria=$catc)";; esac
@@ -466,8 +485,8 @@ else
             || bad "categorical PVS1+PM2 gave '$catk', expected Likely_pathogenic"
         # And the framework-mixing guard is real: forcing Supporting under
         # categorical demotes the same variant to VUS (why the coupling exists).
-        rm -f "$SOUT"
-        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical PM2_STRENGTH=supporting perl filtering_r.pl >scat2.log 2>&1 )
+        rm -f "$SRAW" "$SOUT"
+        ( cd "$SD" && CLINVAR_AA_DIR= REF_FASTA= ACMG_COMBINER=categorical PM2_STRENGTH=supporting perl filtering_r.pl >scat2.log 2>&1 ); body "$SRAW" >/dev/null
         mixk=$(scol acmg_class 3000)
         [ "$mixk" = "VUS" ] \
             && ok "framework-mixing demotion reproduced (categorical + PM2_Supporting -> VUS)" \
@@ -477,8 +496,8 @@ fi
 
 echo "== 9. PM1 from the PERv1 custom track =="
 PD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD" "$PD"' EXIT
-for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$PD/$f"
 done
 # CSQ layout with the PER field appended, exactly as vep_annotate.sh emits it.
@@ -535,7 +554,7 @@ csq4() { printf '%s|1|%s|%s|%s|c.100G>A|p.Gly34Ser|100|G/S|34||||30|likely_patho
 PIN=$(ls "$PD"/*.pangolin_input.csv 2>/dev/null | head -1)
 [ -n "$PIN" ] && : > "${PIN%.pangolin_input.csv}.pangolin.tsv"
 ( cd "$PD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pm1.log 2>&1 )
-POUT=$(ls "$PD"/PMFAM-P.*.candidatos 2>/dev/null | head -1)
+POUT=$(body "$(ls "$PD"/PMFAM-P.*.candidatos 2>/dev/null | head -1)")
 if [ -z "$POUT" ]; then
     bad "section 9: no candidatos"; tail -10 "$PD/pm1.log" | sed 's/^/      /'
 else
@@ -569,8 +588,8 @@ fi
 
 echo "== 10. trio: PS2 MOI gate, PVS1 granularity, splice PP3, points =="
 TRD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD"' EXIT
-for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-         mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$TRD/$f"
 done
 # CSQ record with NO missense predictor scores (so PP3/BP4 come only from where
@@ -627,7 +646,7 @@ if [ -z "$TIN" ]; then bad "section 10: pass 1 emitted no pangolin input"; else
     printf 'chr2-4000-C-T\t0.30\nchr2-5000-G-A\t0.30\nchr2-6000-G-A\t0.60\nchr2-7000-G-A\t0.30\n' > "${TIN%.pangolin_input.csv}.pangolin.tsv"
     ( cd "$TRD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >trpass2.log 2>&1 )
 fi
-TROUT=$(ls "$TRD"/TRFAM-P.*.candidatos 2>/dev/null | head -1)
+TROUT=$(body "$(ls "$TRD"/TRFAM-P.*.candidatos 2>/dev/null | head -1)")
 if [ -z "$TROUT" ]; then
     bad "section 10: no candidatos"; tail -10 "$TRD/trpass2.log" 2>/dev/null | sed 's/^/      /'
 else
@@ -693,12 +712,12 @@ echo "== 11. non-carrier rows, PS1/PM5/PP3 on LoF, trio cis hets, duo PM6 =="
 ED="$(mktemp -d)"; DD="$(mktemp -d)"; AAD="$(mktemp -d)"
 trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD" "$ED" "$DD" "$AAD"' EXIT
 for d in "$ED" "$DD"; do
-  for f in filtering_r.pl parse_pangolin.pl g4e-2026.txt typevar.txt \
-           mane-plus-clinical-names.txt acmg_sf_v3.2.txt gnomad-mis-constraint.txt; do
+  for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+           mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
       ln -sf "$REPO/$f" "$d/$f"
   done
 done
-AR_GENE2=$(awk -F'\t' -v g="$AR_GENE" '!/^#/ && $3=="AR" && $1!=g {print $1; exit}' "$REPO/g4e-2026.txt")
+AR_GENE2=$(awk -F'\t' -v g="$AR_GENE" '!/^#/ && $3=="AR" && $1!=g {print $1; exit}' "$REPO/g4e.txt")
 # <gene> <consequence> <aa> <ppos> <am> <hgvsc>   (gnomAD AC=0 AN=200000, no ClinVar)
 csq6() { printf '%s|1|%s|%s|%s|%s|p.X|100|%s|%s|||||likely_pathogenic|%s||||0|200000|0|0|PASS|||' \
                 "$1" "$MANE_TX" "$MANE_TX" "$2" "$6" "$3" "$4" "$5"; }
@@ -758,8 +777,8 @@ two_pass() { # <dir> <proband>
   ( cd "$1" && CLINVAR_AA_DIR="$AAD" REF_FASTA= perl filtering_r.pl >p2.log 2>&1 )
 }
 two_pass "$ED" E11-P; two_pass "$DD" D11-P
-EOUT=$(ls "$ED"/E11-P.*.candidatos 2>/dev/null | head -1)
-DOUT=$(ls "$DD"/D11-P.*.candidatos 2>/dev/null | head -1)
+EOUT=$(body "$(ls "$ED"/E11-P.*.candidatos 2>/dev/null | head -1)")
+DOUT=$(body "$(ls "$DD"/D11-P.*.candidatos 2>/dev/null | head -1)")
 if [ -z "$EOUT" ] || [ -z "$DOUT" ]; then
     bad "section 11: no candidatos"; tail -5 "$ED/p2.log" "$DD/p2.log" 2>/dev/null | sed 's/^/      /'
 else
@@ -792,6 +811,58 @@ else
         || bad "duo inheritance=$(ecol inheritance 7000 "$DOUT"), expected DN/IF"
     case ",$(ecol acmg_criteria 7000 "$DOUT")," in *,PM6,*|*,PS2,*) bad "duo DN/IF earned PM6/PS2 ($(ecol acmg_criteria 7000 "$DOUT"))";;
         *) ok "duo DN/IF earns no PM6 (one parent untested)";; esac
+fi
+
+# ─────────────── 12: panel refresh (update_panel.sh, offline fixtures) ───────────────
+echo "== 12. update_panel.sh: GDV from ClinGen, removal rule, overrides =="
+UD="$(mktemp -d)"; trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD" "$ED" "$DD" "${AAD:-}" "$UD"' EXIT
+printf 'HGNC_ID\tGene\tEnsemble_ID\tEntrez_ID\tOMIM_ID\tInheritance\tPhenotype(s)\n' > "$UD/EpilepsyGenes_v2099-09.tsv"
+for r in GENEA:AD:DEE GENEB:AR:DEE GENEC:AR:DEE GENED:AD:DEE GENEE:AR:DEE GENEF:AD:DEE GENEG:AD:DEE GENEH:AR:MCD GENEI:AD/AR:Focal; do
+    IFS=: read -r g m ph <<<"$r"; printf 'HGNC:0\t%s\tENSG0\t0\t0\t%s\t%s\n' "$g" "$m" "$ph" >> "$UD/EpilepsyGenes_v2099-09.tsv"
+done
+{ echo '"CLINGEN GENE DISEASE VALIDITY CURATIONS","","","","","","","","",""'
+  echo '"FILE CREATED: 2099-01-01","","","","","","","","",""'
+  echo '"+++","+++","+++","+++","+++","+++","+++","+++","+++","+++"'
+  echo '"GENE SYMBOL","GENE ID (HGNC)","DISEASE LABEL","DISEASE ID (MONDO)","MOI","SOP","CLASSIFICATION","ONLINE REPORT","CLASSIFICATION DATE","GCEP"'
+  echo '"+++","+++","+++","+++","+++","+++","+++","+++","+++","+++"'
+  echo '"GENEA","HGNC:1","developmental and epileptic encephalopathy","MONDO:0100062","AD","SOP10","Definitive","x","2024-01-01T00:00:00Z","x"'
+  echo '"GENEA","HGNC:1","dilated cardiomyopathy","MONDO:0005021","AD","SOP10","Definitive","x","2025-06-01T00:00:00Z","x"'
+  echo '"GENEB","HGNC:2","epilepsy","MONDO:0005027","AR","SOP10","Refuted","x","2026-07-21T00:00:00Z","x"'
+  echo '"GENEC","HGNC:3","Leigh syndrome","MONDO:0009723","AR","SOP10","Limited","x","2021-01-01T00:00:00Z","x"'
+  echo '"GENEF","HGNC:6","complex neurodevelopmental disorder","MONDO:0100038","AD","SOP10","Limited","x","2024-01-01T00:00:00Z","x"'
+  echo '"GENEG","HGNC:7","complex neurodevelopmental disorder","MONDO:0100038","AD","SOP10","Limited","x","2024-01-01T00:00:00Z","x"'
+  echo '"GENEG","HGNC:7","hypertrophic cardiomyopathy","MONDO:0005045","AD","SOP10","Strong","x","2023-01-01T00:00:00Z","x"'
+  echo '"GENEH","HGNC:8","polymicrogyria","MONDO:0000087","AD","SOP10","Disputed","x","2022-01-01T00:00:00Z","x"'
+  echo '"GENEI","HGNC:9","genetic developmental and epileptic encephalopathy","MONDO:0100062","AD","SOP10","Moderate","x","2020-01-01T00:00:00Z","x"'
+  echo '"GENEI","HGNC:9","genetic developmental and epileptic encephalopathy","MONDO:0100062","AD","SOP10","Definitive","x","2025-01-01T00:00:00Z","x"'
+} > "$UD/clingen.csv"
+printf '# test overrides\nGENEE\tMOI\tAD, AR\tfixture\nGENEF\tKEEP\t-\tfixture\nGENEA\tMOI\tAD\tno-op fixture\n' > "$UD/ovr.tsv"
+if bash "$REPO/update_panel.sh" --g4e "$UD/EpilepsyGenes_v2099-09.tsv" --clingen "$UD/clingen.csv" \
+        --overrides "$UD/ovr.tsv" --out "$UD/panel.txt" >"$UD/up.log" 2>&1; then
+    ok "update_panel.sh ran on fixtures"
+    gdv() { awk -F'\t' -v g="$1" '!/^#/ && $1==g{print $'"${2:-4}"'}' "$UD/panel.txt"; }
+    grep -qx '## panel_version=Genes4Epilepsy v2099-09' "$UD/panel.txt" && ok "header: Genes4Epilepsy version" || bad "header: no panel_version"
+    grep -qx '## clingen_fileDate=2099-01-01' "$UD/panel.txt" && ok "header: ClinGen file date" || bad "header: no clingen_fileDate"
+    [ "$(gdv GENEA)" = "Definitive|developmental and epileptic encephalopathy|MONDO:0100062|AD|2024-01-01" ] \
+        && ok "GDV = CLASS|disease|MONDO|MOI|date, epilepsy assertion preferred over a newer non-neuro one" \
+        || bad "GENEA GDV '$(gdv GENEA)'"
+    [ "$(gdv GENEI)" = "Definitive|genetic developmental and epileptic encephalopathy|MONDO:0100062|AD|2025-01-01" ] \
+        && ok "GDV picks the highest classification among relevant assertions" || bad "GENEI GDV '$(gdv GENEI)'"
+    [ "$(gdv GENEI 3)" = "AD, AR" ] && ok "G4E 'AD/AR' mapped to panel 'AD, AR'" || bad "GENEI MOI '$(gdv GENEI 3)'"
+    [ "$(gdv GENED)" = "NOT_CURATED" ] && ok "uncurated gene -> NOT_CURATED" || bad "GENED GDV '$(gdv GENED)'"
+    [ -z "$(gdv GENEB)" ] && grep -q '^# REMOVED GENEB	Refuted|epilepsy' "$UD/panel.txt" \
+        && ok "Refuted epilepsy gene removed and listed in the header" || bad "GENEB not removed/listed"
+    [ -n "$(gdv GENEC)" ] && ok "Leigh-only Limited curation does not remove a gene (POLG case)" || bad "GENEC wrongly removed"
+    [ "$(gdv GENEE 3)" = "AD, AR" ] && grep -q '^# OVERRIDE GENEE MOI AR -> AD, AR' "$UD/panel.txt" \
+        && ok "MOI override applied and recorded" || bad "GENEE MOI '$(gdv GENEE 3)'"
+    [ -n "$(gdv GENEF)" ] && ok "KEEP override retains a Limited gene" || bad "GENEF dropped despite KEEP"
+    [ -n "$(gdv GENEG)" ] && ok "Limited NDD gene kept when another MOI-compatible assertion is >= Moderate" || bad "GENEG wrongly removed"
+    [ -n "$(gdv GENEH)" ] && ok "Disputed assertion with an incompatible MOI does not remove the gene" || bad "GENEH wrongly removed"
+    n=$(awk -F'\t' '!/^#/ && NF==4' "$UD/panel.txt" | wc -l)
+    [ "$n" -eq 8 ] && ok "8 of 9 fixture genes written, 4 columns each" || bad "fixture panel has $n 4-column rows, expected 8"
+    grep -q '^# OVERRIDE GENEA' "$UD/panel.txt" && bad "no-op override reported as a change" || ok "no-op override not reported"
+else
+    bad "update_panel.sh failed on fixtures"; tail -5 "$UD/up.log" | sed 's/^/      /'
 fi
 
 echo
