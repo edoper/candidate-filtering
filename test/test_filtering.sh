@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 #
-# test_filtering.sh — regression test for the filtering logic. Synthetic data only:
+# test_filtering.sh: regression test for the filtering logic. Synthetic data only:
 # no patient data, no VEP, no cloud, no network, no GPU. Runs in a temp dir in ~5s.
 # Requires: perl, bgzip (htslib). Run it after changing filtering_r.pl.
 #
 # Covers:
 #   1. Family auto-discovery          (filtering_r.pl --selftest,        9 assertions)
 #   2. Cohort recurrent-artifact gate (filtering_r.pl --selftest-cohort, 11 assertions)
-#   3. Reference data integrity       — the tracked panel/whitelist/constraint files
+#   3. Reference data integrity      : the tracked panel/whitelist/constraint files
 #                                       still parse with the expected shape
-#   4. End-to-end gating              — a synthetic annotated VCF through both passes:
+#   4. End-to-end gating             : a synthetic annotated VCF through both passes:
 #                                       the one real candidate is kept, and a common
 #                                       variant, a synonymous one, a non-panel gene and a
 #                                       solitary AR-gene het (carrier) are all dropped.
-#   5. Consult mode + BP7             — --lookup output is namespaced, BP7 needs a real score
-#   6. Batch-level table              — batch.<panel>.candidatos agrees with the per-proband one
-#   7. Genotype + criterion edges     — haploid (hemizygous) GT, plain-XL MOI, the PP5 review-star
+#   5. Consult mode + BP7            : --lookup output is namespaced, BP7 needs a real score
+#   6. Batch-level table             : batch.<panel>.candidatos agrees with the per-proband one
+#   7. Genotype + criterion edges    : haploid (hemizygous) GT, plain-XL MOI, the PP5 review-star
 #                                       gate, per-gene row collapse, clinvar_conflict flagging
-#   8-10. combiner, PM1, trio fixture  — points/categorical coupling, PERv1 arms, PS2 MOI gate,
+#   8-10. combiner, PM1, trio fixture : points/categorical coupling, PERv1 arms, PS2 MOI gate,
 #                                       splice floors incl. the gnomAD-footprint gate
-#   11. audit fixes (2026-09-29)       — 0/0 + no-call proband rows skipped, no PS1/PM5 on
+#   11. audit fixes (2026-09-29)      : 0/0 + no-call proband rows skipped, no PS1/PM5 on
 #                                       frameshift/start_lost, no PP3 on PVS1_Moderate, trio cis
 #                                       hets are carriers, no duo PM6 (with a ClinVar AA fixture)
 set -uo pipefail
@@ -49,7 +49,7 @@ echo "== 2. cohort recurrent-artifact filter =="
 selftest --selftest-cohort "cohort self-test"
 
 # ─────────────── 3: reference data integrity ───────────────
-# These files ARE the clinical behaviour — a truncated download silently changes results.
+# These files ARE the clinical behaviour: a truncated download silently changes results.
 echo "== 3. tracked reference data =="
 n=$(grep -vcE '^#|^$' g4e.txt);            [ "$n" -gt 500 ]  && ok "panel: $n genes"            || bad "panel too small ($n)"
 n=$(awk -F'\t' '!/^#/ && NF==4' g4e.txt | wc -l)
@@ -108,7 +108,7 @@ DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO
   printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq ZZZNOTAGENE missense_variant 30 0.99 0 0)"
   # DROP: solitary het in a pure AR gene = carrier state, not an explanation (default drop)
   printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$AR_GENE" missense_variant 30 0.99 0 0)"
-  # KEEP: ClinVar P/LP (1 star) at 5% in gnomAD — an established classification outranks
+  # KEEP: ClinVar P/LP (1 star) at 5% in gnomAD; an established classification outranks
   # the rarity ceiling, so founder alleles are not lost. No in-silico support at all.
   printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" missense_variant 5 0.10 5000 100000 Pathogenic "$STAR1")"
   # KEEP: ClinVar P/LP (1 star) on a consequence that is NOT whitelisted (intronic)
@@ -125,7 +125,7 @@ DUAL_GENE=$(awk -F'\t' '!/^#/ && $3 ~ /AD/ && $3 ~ /AR/ {print $1; exit}' "$REPO
 } | bgzip -c > "$TD/TESTFAM-P.germline.vep.vcf.gz"
 
 # Pass 1 emits <proband>.<panel>.pangolin_input.csv and stops. Supply an empty score map
-# (same panel-namespaced prefix) so pass 2 runs without Pangolin/GPU — variants that need a
+# (same panel-namespaced prefix) so pass 2 runs without Pangolin/GPU: variants that need a
 # splice score simply get none, which is the documented graceful behaviour.
 ( cd "$TD" && CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >pass1.log 2>&1 )
 IN=$(ls "$TD"/TESTFAM-P.*.pangolin_input.csv 2>/dev/null | head -1)
@@ -168,7 +168,7 @@ else
                     'NR>1 && $2==p{n=split($c,a,";"); for(i=1;i<=n;i++) if(a[i]==f){print "yes"; exit}}' "$OUT"; }
 
     # An established ClinVar classification outranks the rarity ceiling and the
-    # consequence whitelist — both gates otherwise fire before any evidence is read.
+    # consequence whitelist: both gates otherwise fire before any evidence is read.
     [ -n "$(row 6000)" ] && ok "ClinVar P/LP kept at 5% gnomAD AF (founder allele preserved)" \
                          || bad "ClinVar P/LP variant dropped by the rarity gate"
     [ -n "$(row 7000)" ] && ok "ClinVar P/LP kept on a non-whitelisted consequence (intronic)" \
@@ -232,7 +232,7 @@ if [ -n "${OUT:-}" ]; then
     grep -q 'BP7' "$LK2" && ok "BP7 fires on a scored synonymous variant (0.05 < 0.2)" \
                          || bad "BP7 did not fire despite a sub-threshold Pangolin score"
 else
-    bad "skipping consult tests — section 4 produced no candidatos"
+    bad "skipping consult tests: section 4 produced no candidatos"
 fi
 
 # ─────────────── 6: batch-level table ───────────────
@@ -246,7 +246,7 @@ if [ -n "$BATCH" ]; then
     [ "$(head -1 "$BATCH" | cut -f1)" = "sample" ] \
         && ok "batch table's first column is 'sample'" \
         || bad "batch table's first column is '$(head -1 "$BATCH" | cut -f1)', expected 'sample'"
-    # Same rows as the per-proband table, plus the sample prefix — the two must agree,
+    # Same rows as the per-proband table, plus the sample prefix: the two must agree,
     # otherwise the batch view and the per-case view tell a curator different stories.
     nb=$(awk 'NR>1' "$BATCH" | wc -l)
     [ "$nb" -eq "${nrow:-0}" ] && ok "batch rows match the per-proband table ($nb)" \
@@ -270,7 +270,7 @@ for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
          mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
     ln -sf "$REPO/$f" "$XD/$f"
 done
-# A plain "XL" gene — the g4e vocabulary for X-linked genes with no XLD/XLR split.
+# A plain "XL" gene: the g4e vocabulary for X-linked genes with no XLD/XLR split.
 XL_GENE=$(awk -F'\t' '!/^#/ && $3=="XL" {print $1; exit}' "$REPO/g4e.txt")
 TX2=$(grep -m2 '^ENST' "$REPO/mane-plus-clinical-names.txt" | tail -1 | cut -f1)
 GENE_B=$(awk -F'\t' '!/^#/ && $3=="AD" {print $1}' "$REPO/g4e.txt" | sed -n 2p)
@@ -295,7 +295,7 @@ xhdr() {
 {
   xhdr XFAM-P
   # HEMIZYGOUS male call in an X-linked gene: DRAGEN emits a single-allele GT.
-  # No in-silico support at all — it must survive on the AR_hem rescue alone.
+  # No in-silico support at all: it must survive on the AR_hem rescue alone.
   printf 'chrX\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1:0,40:40:99\n' "$(csq "$XL_GENE" missense_variant 5 0.10 0 0)"
   # ClinVar Pathogenic with ZERO review stars: kept by the ClinVar rescue arm, but
   # must NOT earn PP5 (which now requires >=1 star, like every other ClinVar consumer).
@@ -311,7 +311,7 @@ xhdr() {
   printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq "$PANEL_GENE" stop_gained 35 0.99 0 0 Benign "$STAR1")"
 } | bgzip -c > "$XD/XFAM-P.germline.vep.vcf.gz"
 # Father: hemizygous for the same chrX variant. He can only be seen as a carrier if
-# haploid GTs parse — otherwise the son's variant is called de novo.
+# haploid GTs parse: otherwise the son's variant is called de novo.
 { xhdr XFAM-F
   printf 'chrX\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t1:0,40:40:99\n' "$(csq "$XL_GENE" missense_variant 5 0.10 0 0)"
 } | bgzip -c > "$XD/XFAM-F.germline.vep.vcf.gz"
@@ -397,7 +397,7 @@ csq3() { # <gene> <consequence> <cadd> <am> <ac> <an> <hgvsc>
   # ACMG-SF gene, whitelisted consequence -> must reach the Pangolin input (#6).
   printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$SF_GENE" missense_variant 30 0.99 1 200000 'c.500G>A')"
   # Truncating + gnomAD-absent, with NO computational support (empty AlphaMissense/REVEL)
-  # so the class rests on PVS1 + PM2 alone — that is what makes it a PM2-strength probe.
+  # so the class rests on PVS1 + PM2 alone: that is what makes it a PM2-strength probe.
   printf 'chr2\t3000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq3 "$PANEL_GENE" stop_gained 5 '' 0 0 'c.600G>A')"
 } | bgzip -c > "$SD/SPFAM-P.germline.vep.vcf.gz"
 
@@ -444,7 +444,7 @@ else
 
         # PM2 strength FOLLOWS THE COMBINER: the points default records
         # PM2_Supporting (ClinGen SVI 2020), and PVS1(8)+PM2_Supporting(1)=9
-        # reaches Likely_pathogenic — the pathway categorical ACMG 2015 lacks.
+        # reaches Likely_pathogenic: the pathway categorical ACMG 2015 lacks.
         pm2c=$(scol acmg_criteria 3000); pm2k=$(scol acmg_class 3000); pm2p=$(scol acmg_points 3000)
         case ",$pm2c," in *,PM2_Supporting,*) ok "PM2 recorded as PM2_Supporting (ClinGen SVI / points default)";;
                           *) bad "PM2_Supporting missing on a gnomAD-absent variant (criteria=$pm2c)";; esac
@@ -651,16 +651,16 @@ if [ -z "$TROUT" ]; then
     bad "section 10: no candidatos"; tail -10 "$TRD/trpass2.log" 2>/dev/null | sed 's/^/      /'
 else
     tcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$TROUT"; }
-    # 1000 — PS2 in a dominant gene
+    # 1000: PS2 in a dominant gene
     case ",$(tcol acmg_criteria 1000)," in *,PS2,*) ok "clean trio de novo in a dominant gene earns PS2";;
         *) bad "PS2 missing on a clean trio DN (criteria=$(tcol acmg_criteria 1000), inh=$(tcol inheritance 1000))";; esac
     [ "$(tcol acmg_class 1000)" = "Pathogenic" ] && [ "$(tcol acmg_points 1000)" = "13" ] \
         && ok "PVS1+PS2+PM2_Supporting = 13 points -> Pathogenic" \
         || bad "expected Pathogenic/13, got $(tcol acmg_class 1000)/$(tcol acmg_points 1000)"
-    # 2000 — MOI gate in a pure-AR gene
+    # 2000: MOI gate in a pure-AR gene
     case ",$(tcol acmg_criteria 2000)," in *,PS2,*|*,PM6,*) bad "PS2/PM6 fired on a de novo in a PURE-AR gene (criteria=$(tcol acmg_criteria 2000))";;
         *) ok "PS2/PM6 withheld on a de novo in a pure-AR gene (MOI gate)";; esac
-    # 3000 — Tayoun start_lost cap
+    # 3000: Tayoun start_lost cap
     tc3=$(tcol acmg_criteria 3000)
     case ",$tc3," in *,PVS1,*) bad "start_lost earned FULL PVS1 (criteria=$tc3)";;
         *,PVS1_Moderate,*) ok "start_lost capped at PVS1_Moderate (Tayoun 2018)";;
@@ -668,17 +668,17 @@ else
     [ "$(tcol acmg_class 3000)" = "VUS" ] \
         && ok "PVS1_Moderate+PM2_Supporting = $(tcol acmg_points 3000) points -> VUS" \
         || bad "start_lost row classed $(tcol acmg_class 3000), expected VUS"
-    # 4000 — splice dead zone closed
+    # 4000: splice dead zone closed
     if [ -n "$(awk -F'\t' 'NR>1 && $2==4000' "$TROUT")" ]; then
         ok "whitelisted splice variant at Pangolin 0.30 KEPT (dead zone closed)"
         case "$(tcol kept_by 4000)" in *Pangolin*) ok "kept_by records the Pangolin arm at the 0.2 floor";;
-            *) bad "kept_by=$(tcol kept_by 4000) — splice rescue arm not credited";; esac
+            *) bad "kept_by=$(tcol kept_by 4000): splice rescue arm not credited";; esac
         case ",$(tcol acmg_criteria 4000)," in *,PP3_Supporting,*) ok "Pangolin >= 0.2 earns splice PP3_Supporting";;
             *) bad "no PP3_Supporting on a 0.30-scoring splice variant (criteria=$(tcol acmg_criteria 4000))";; esac
     else
         bad "whitelisted splice variant at Pangolin 0.30 was dropped (dead zone NOT closed)"
     fi
-    # 5000/6000/7000 — gnomAD footprint gate on the whitelisted splice rescue
+    # 5000/6000/7000: gnomAD footprint gate on the whitelisted splice rescue
     if [ -n "$(awk -F'\t' 'NR>1 && $2==5000' "$TROUT")" ]; then
         bad "uncovered (-12, AN=0) splice variant at Pangolin 0.30 leaked in (criteria=$(tcol acmg_criteria 5000))"
     else
@@ -802,7 +802,7 @@ else
     case ",$(ecol acmg_criteria 4000 "$EOUT")," in *,PM5*) ok "real missense at a P/LP residue still earns PM5";;
         *) bad "PM5 lost on a real missense (criteria=$(ecol acmg_criteria 4000 "$EOUT"))";; esac
     if has 5000 "$EOUT" || has 5100 "$EOUT"; then
-        bad "two maternal-only hets in a pure-AR gene kept (flags=$(ecol flags 5000 "$EOUT")) — cis is not biallelic"
+        bad "two maternal-only hets in a pure-AR gene kept (flags=$(ecol flags 5000 "$EOUT")): cis is not biallelic"
     else ok "trio cis hets in a pure-AR gene go down the carrier path (dropped)"; fi
     case "$(ecol flags 6000 "$EOUT")|$(ecol flags 6100 "$EOUT")" in
         CompHet\(trans\)*\|CompHet\(trans\)*) ok "one-per-parent hets still CompHet(trans)";;

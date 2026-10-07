@@ -7,7 +7,7 @@ use warnings;
 run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 
 #############################################################################
-# filtering_r.pl  —  clinical candidate filtering for trio/duo germline VCFs
+# filtering_r.pl :  clinical candidate filtering for trio/duo germline VCFs
 #                    (robust successor of filtering_new.pl / filtering_b3.pl)
 #
 # Pipeline features
@@ -43,7 +43,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    site presence.                                                [#5,#10]
 #  * One MANE row per variant: a variant annotating onto >1 MANE transcript
 #    (MANE Select + MANE Plus Clinical, or overlapping gene models) is collapsed to
-#    a single row — prefer panel-primary, then MANE Select, then most evidence arms.
+#    a single row: prefer panel-primary, then MANE Select, then most evidence arms.
 #    (--lookup consults still report every annotation.)                     [#3]
 #  * Per-gene recessive logic (recessive-capable genes only): homozygous and
 #    compound-het (trans where phaseable) flags. Purely dominant genes get no
@@ -54,7 +54,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    flag. Pure AR/XLR genes use the recessive path below.                    [#5]
 #  * Recessive carriers (DEFAULT = drop): a solitary het in a PURE recessive (AR/XLR)
 #    gene that is not biallelic is DROPPED (a single het can't explain recessive disease;
-#    carrier states are clinical noise). True comp-hets are unaffected — a gene with >=2
+#    carrier states are clinical noise). True comp-hets are unaffected: a gene with >=2
 #    gate-passing hets is a biallelic CompHet and kept. OPT-IN --keep-ar-carriers /
 #    KEEP_AR_CARRIERS=1 surfaces the STRONG such carriers (carrier-only tier: ClinVar
 #    P/LP >=1*, HC-LoF, or >=2 Moderate-calibrated predictors AM>=0.906/CADD>=28.1/EVE-path/
@@ -62,16 +62,16 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * ClinVar (fresh, via --custom), gnomAD nhomalt + FILTER surfaced as
 #    columns.                                                      [#4,#7]
 #  * ACMG SF secondary findings: the 84 ACMG SF v3.3 genes are ALWAYS scanned
-#    (independent of the candidate panel) with a STRICTER gate — ClinVar P/LP
+#    (independent of the candidate panel) with a STRICTER gate: ClinVar P/LP
 #    (>=1 star, frequency-agnostic) OR novel LOFTEE-HC OR >=2 Moderate-calibrated computational
 #    predictors (AM>=0.906, CADD>=28.1, EVE path, REVEL>=0.773); AR genes report
 #    biallelic only. These appear in the SAME candidatos output flagged with
 #    GDV=Incidental (Association/MOI from the ACMG table; kept_by = evidence tier).
 #  * Automated ACMG/AMP classification (TRIAGE ONLY): per-row acmg_class +
-#    acmg_points + acmg_criteria, combined per $COMBINER — Tavtigian-2020 points
+#    acmg_points + acmg_criteria, combined per $COMBINER: Tavtigian-2020 points
 #    (DEFAULT: 8/4/2/1, class from the summed score) or categorical ACMG 2015.
-#    PP3/BP4 use a single CALIBRATED tool — AlphaMissense primary (Bergquist 2025),
-#    REVEL fallback (Pejaver 2022) — graded Supporting/Moderate/Strong with a REVEL
+#    PP3/BP4 use a single CALIBRATED tool: AlphaMissense primary (Bergquist 2025),
+#    REVEL fallback (Pejaver 2022): graded Supporting/Moderate/Strong with a REVEL
 #    direction-conflict veto; Pangolin >= 0.2 adds splice PP3_Supporting (never on
 #    top of full PVS1). PVS1: start_lost capped at Moderate (Tayoun 2018).
 #    PS2/PM6 require a dominant-capable panel MOI. PP2: missense in a gene with
@@ -83,14 +83,14 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    cohort auto-analyzed together (>= $COHORT_MIN probands), a candidate carried by
 #    >= $COHORT_MAX_FRAC of samples AND absent from gnomAD (joint AC == 0) is
 #    a systematic technical artifact (paralog/low-complexity mismapping) and is
-#    dropped — both conditions required, so population bottlenecks / founder alleles
+#    dropped: both conditions required, so population bottlenecks / founder alleles
 #    (which carry a gnomAD footprint) are preserved. OFF for single-variant, forced/
 #    single-proband, and small runs. --keep-cohort-artifacts keeps+tags instead. [#11]
 #  * QC / artifact flags (in the consolidated `flags` column, after the recessive
 #    verdict): lowDP, lowGQ, AB_het/AB_hom, homopolymer, clinvar_conflict,
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
-#    parental reference depth — DN is flagged DN_unconfirmed by design.      [#6]
+#    parental reference depth: DN is flagged DN_unconfirmed by design.      [#6]
 #  * Run summary printed per proband.                                  [#9]
 #
 # Splicing (Pangolin) two-pass bridge
@@ -108,8 +108,8 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  (off-panel genes get Association/MOI/GDV = NA; kept_by lists whichever evidence
 #  arms fire, else "none"). MANE-only unless --all-transcripts. Genotype columns
 #  are blank (sites-only) and inheritance = NA.
-#  Output is the TRANSPOSED, human-readable view only — one "field <TAB> value"
-#  line per column (not the TSV candidatos table) — written to
+#  Output is the TRANSPOSED, human-readable view only: one "field <TAB> value"
+#  line per column (not the TSV candidatos table): written to
 #  Lookup.<coords>.<panel>.candidatos and echoed to stdout.
 #  Two ways in:
 #    -v/--variant '<v>'   resolve + annotate variant(s) from scratch (repeatable).
@@ -160,17 +160,17 @@ my $GNOMAD_INTRON_PAD = 10;
 # typevar.txt has no bare `intron_variant` and no bare `synonymous_variant`, so a
 # deep-intronic or exonic-synonymous splice-disrupting variant was dropped at Stage 1,
 # never reached Pangolin, and the splice rescue arm could only ever UPGRADE a variant that
-# was already whitelisted — never DISCOVER one. The classic pathogenic deep-intronic
+# was already whitelisted: never DISCOVER one. The classic pathogenic deep-intronic
 # alleles (CFTR c.3718-2477C>T, USH2A c.7595-2144A>G) were structurally unreachable.
 #
 # Probes are scored by Pangolin and kept ONLY if the splice arm fires (>= $SPLICE_MIN).
 # They are not candidates in their own right, so a probe that Pangolin scores low simply
-# disappears — the probe set widens what can be FOUND without widening the table.
+# disappears: the probe set widens what can be FOUND without widening the table.
 #
 # VOLUME IS THE BINDING CONSTRAINT. Pangolin scores ~8 variants/s on one GPU, and a WGS
 # proband carries ~155k rare intronic variants in panel genes. Two bounds keep it finite:
 #   (a) distance from the exon boundary, read from the HGVSc offset; and
-#   (b) a strict rarity ceiling applied to ALL genes — a pathogenic splice variant is rare
+#   (b) a strict rarity ceiling applied to ALL genes: a pathogenic splice variant is rare
 #       regardless of the gene's mode of inheritance, so the permissive $FREQ_AR carrier
 #       ceiling (1%, meant for recessive coding candidates) is deliberately NOT used here.
 # Set $SPLICE_PROBE = 0, or pass --no-splice-discovery, to restore the prior behaviour.
@@ -183,7 +183,7 @@ my $PROBE_FREQ_MAX  = 0.01;   # max gnomAD AF (%) for a probe, every gene
 # MEASURED COST OF THIS SETTING. The custom VCF is gnomAD.joint.v4.1.**mane**, so intronic
 # coverage is thin: on a real WGS proband the 300 bp window contains ~22,700 rare intronic
 # variants, but only ~8 of them are gnomAD-covered. Requiring coverage therefore keeps the
-# probe set almost free (8 probes/proband) — and keeps discovery confined to roughly the
+# probe set almost free (8 probes/proband): and keeps discovery confined to roughly the
 # MANE footprint, so a classic deep-intronic allele (CFTR c.3718-2477C>T) is still out of
 # reach. Turning it OFF (--probe-uncovered) probes all ~22,700: at ~8 variants/s that is
 # ~48 min per proband of GPU time, and every rescued variant sits in territory where the
@@ -195,8 +195,8 @@ my $PROBE_FREQ_MAX  = 0.01;   # max gnomAD AF (%) for a probe, every gene
 my $PROBE_REQUIRE_GNOMAD = $ENV{PROBE_UNCOVERED} ? 0 : 1;
 
 # ── Cohort recurrent-artifact filter (internal panel-of-normals) [#11] ──
-# Systematic technical artifacts — reference/mapping errors in paralog-rich or
-# low-complexity genes (e.g. SYNE1, KMT2C) — recur across a large fraction of a
+# Systematic technical artifacts: reference/mapping errors in paralog-rich or
+# low-complexity genes (e.g. SYNE1, KMT2C): recur across a large fraction of a
 # cohort yet are ABSENT from gnomAD. That combination is the discriminator: a
 # population bottleneck or an under-represented ancestry CANNOT produce it, because
 # a real founder allele frequent enough to reach a quarter of the cohort would
@@ -207,17 +207,17 @@ my $PROBE_REQUIRE_GNOMAD = $ENV{PROBE_UNCOVERED} ? 0 : 1;
 # ceiling at or above $FREQ_AD is already implied by the Stage-1 rarity gate for
 # dominant genes, which would leave recurrence as the only effective condition and
 # strip the founder-safety the second condition exists to provide. Requiring a
-# literal zero keeps that protection meaningful for every mode of inheritance —
+# literal zero keeps that protection meaningful for every mode of inheritance,
 # any gnomAD footprint at all, however small, spares the variant.
 # Activates ONLY for a real cohort auto-analyzed together (>= $COHORT_MIN probands,
 # no forced selection): single-variant (-v/--lookup) and single/forced-proband
 # (--proband) runs never activate it, and trios/duos/small runs are untouched
 # (a per-variant or per-proband consult has no cohort to compare against). Logged;
 # --keep-cohort-artifacts (env KEEP_COHORT_ARTIFACTS=1) keeps them instead, tagged
-# flags=cohort_artifact — for a founder-enriched cohort, review the drop log, as a
+# flags=cohort_artifact: for a founder-enriched cohort, review the drop log, as a
 # genuinely private founder allele would surface there.
 # THRESHOLDS (revised 2026-08). The filter previously needed >= 10 probands, which no
-# real internal batch reaches — batches run 6-9 samples — so it had never once fired on
+# real internal batch reaches, batches run 6-9 samples, so it had never once fired on
 # a clinical run, and the recurrent KMT2C/SYNE1 mismapping artifacts reached every
 # delivered table. Two changes make it work at the batch sizes actually used:
 #
@@ -249,7 +249,7 @@ my %LOF_CONS = map { $_ => 1 }
 # Emitted into the SAME candidatos output, flagged GDV=Incidental.
 my $ACMG_FILE   = 'acmg_sf_v3.3.txt';
 my $SF_FREQ_MAX = 0.5;     # max gnomAD AF (%) for the NOVEL SF tiers (LoF/computational)
-my $SF_AM       = 0.906;   # AlphaMissense (ClinGen PP3_Moderate, Bergquist 2025 — the SF tier needs 2 together)
+my $SF_AM       = 0.906;   # AlphaMissense (ClinGen PP3_Moderate, Bergquist 2025: the SF tier needs 2 together)
 my $SF_CADD     = 28.1;    # CADD PHRED (PP3_Moderate, Pejaver 2022; CADD has no Strong interval)
 my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
 
@@ -268,17 +268,17 @@ my $PM2_AC_MAX  = 1;       # gnomAD AC at/below -> PM2 (absent=0 or singleton=1)
 #   Supporting=1; benign mirror negative. Class: >=10 Pathogenic, 6..9
 #   Likely_pathogenic, 0..5 VUS, -1..-6 Likely_benign, <=-7 Benign.
 #   TRIAGE DEVIATION: BA1 is scored as -8 (Very-Strong benign) instead of the
-#   standard absolute exclusion — a ClinVar-P founder allele above the BA1
+#   standard absolute exclusion: a ClinVar-P founder allele above the BA1
 #   ceiling must surface with its tension visible (clinvar_conflict flag), not
 #   be silently forced Benign before a curator sees it.
-#   The points class has no "Conflicting" verdict — opposing evidence nets out
+#   The points class has no "Conflicting" verdict: opposing evidence nets out
 #   arithmetically; hard contradictions still raise flags=clinvar_conflict.
 # 'categorical': ACMG 2015 Table 5 (the pre-2026-08 default), kept for
 #   comparison/audit. acmg_points is computed and reported in BOTH modes.
 my $COMBINER = $ENV{ACMG_COMBINER} // 'points';   # 'points' | 'categorical'
 
 # PM2 evidence strength FOLLOWS THE COMBINER. ClinGen SVI (2020) recommends
-# Supporting — coherent under 'points', where PVS1(8) + PM2_Supporting(1) = 9
+# Supporting: coherent under 'points', where PVS1(8) + PM2_Supporting(1) = 9
 # still reaches Likely_pathogenic. Under 'categorical' the same downgrade is
 # framework-mixing: ACMG 2015 has no "PVS1 + 1 supporting" pathway, so it
 # silently demotes every gnomAD-absent LoF variant in a disease gene to VUS
@@ -306,7 +306,7 @@ run_cohort_selftest() if grep { $_ eq '--selftest-cohort' } @ARGV;
 # Resolve each reference file from the CURRENT directory first (so a run directory can
 # drop in its own panel), then from the script's own directory. Without this every
 # reference file was opened by bare relative name, so the documented $WORKDIR override
-# only worked if you symlinked the whole repo into the run directory — which is exactly
+# only worked if you symlinked the whole repo into the run directory: which is exactly
 # what the per-sample batch directories had been doing.
 my $CF_REPO = $0;
 $CF_REPO = ($CF_REPO =~ s{/[^/]+$}{}r);
@@ -326,7 +326,7 @@ print "hash mane, listo!\n";
 
 # gnomAD v4.1.1 missense constraint (MANE Select): gene -> mis.oe, for the ACMG PP2
 # criterion. Genes flagged as missense-constraint outliers (outlier_mis / no_exp_mis)
-# are skipped so they can never earn PP2. Optional file — absent -> PP2 simply never fires.
+# are skipped so they can never earn PP2. Optional file: absent -> PP2 simply never fires.
 # gnomAD v4.1.1 predates several HGNC symbol changes, so a current panel/VEP symbol
 # can miss its own constraint record and silently forfeit PP2. These five are confirmed
 # renames where the OLD symbol is present in the constraint file (verified by lookup);
@@ -354,7 +354,7 @@ if (open my $mc, "<", ref_file($CONSTRAINT_FILE)) {
     printf "missense constraint (PP2): %d MANE genes loaded (mis.oe < %s -> constrained)\n",
            scalar keys %mis_oe, $PP2_MIS_OE;
 } else {
-    warn "NOTE: $CONSTRAINT_FILE not found — ACMG PP2 disabled (missense constraint unavailable)\n";
+    warn "NOTE: $CONSTRAINT_FILE not found; ACMG PP2 disabled (missense constraint unavailable)\n";
 }
 
 # Missense o/e for a gene symbol, falling back to its pre-rename symbol. Returns
@@ -384,7 +384,7 @@ my ($LOOKUP, $ALL_TX, $KEEP_VCF, $NO_SPLICE) = (0, 0, 0, 0);
 # DROPPED (biallelic-only; carrier states are clinical noise, and true comp-hets are kept
 # independently via the CompHet flag). Set KEEP_AR_CARRIERS=1 or --keep-ar-carriers to
 # SURFACE the strong such carriers (carrier-only tier: strong-evidence & not benign,
-# flagged flags=carrier-only; see the [#1,#2] block) — e.g. to chase a possible
+# flagged flags=carrier-only; see the [#1,#2] block): e.g. to chase a possible
 # missed second hit (deep-intronic, CNV) in a targeted investigation.
 my $KEEP_AR_CARRIERS = $ENV{KEEP_AR_CARRIERS} ? 1 : 0;
 # Keep (don't drop) cohort recurrent-artifact variants, tagging them flags=
@@ -441,24 +441,24 @@ while (my $g = <PANEL>) {
 }
 close PANEL;
 printf "gene panel: %s (%d genes%s)\n", $PANEL, scalar(keys %epigenes),
-       $custom_panel ? ", custom — missing Association/MOI/GDV = NA" : "";
+       $custom_panel ? ", custom: missing Association/MOI/GDV = NA" : "";
 # The default panel is regenerated by update_panel.sh after each Genes4Epilepsy release
 # (March / September). Nag when its ClinGen snapshot is older than ~7 months.
 if (($panel_meta{clingen_fileDate} // "") =~ /^(\d{4})-(\d{2})-(\d{2})$/) {
     my @t = localtime; my $now = ($t[5]+1900)*12 + $t[4];
     my $age = $now - ($1*12 + $2 - 1);
     warn "WARN: panel $PANEL was built from a ClinGen export dated $panel_meta{clingen_fileDate} "
-       . "($age months ago) — run update_panel.sh\n" if $age > 7;
+       . "($age months ago): run update_panel.sh\n" if $age > 7;
 }
 
 # PP2 coverage. A panel gene with no constraint record can never earn PP2, and the
-# failure is otherwise invisible — report it once at startup instead of letting the
+# failure is otherwise invisible: report it once at startup instead of letting the
 # criterion go quietly missing for part of the panel.
 if (%mis_oe) {
     my @no_constraint = sort grep { !defined mis_oe_for($_) } keys %epigenes;
     printf "PP2 coverage: %d/%d panel genes have gnomAD missense constraint%s\n",
            scalar(keys %epigenes) - scalar(@no_constraint), scalar(keys %epigenes),
-           @no_constraint ? " — no record for: ".join(" ", @no_constraint) : "";
+           @no_constraint ? ": no record for: ".join(" ", @no_constraint) : "";
 }
 
 # Consequence whitelist (atomic terms recommended; compound entries harmless).
@@ -480,7 +480,7 @@ if (open my $afh, "<", ref_file($ACMG_FILE)) {
     close $afh;
     printf "ACMG SF: %d genes (secondary findings, always evaluated)\n", scalar keys %acmg;
 } else {
-    warn "WARN: $ACMG_FILE not found — secondary findings (Incidental) disabled\n";
+    warn "WARN: $ACMG_FILE not found; secondary findings (Incidental) disabled\n";
 }
 
 # ── ClinVar amino-acid evidence for PS1/PM5 (optional; graceful if absent) ──
@@ -502,7 +502,7 @@ if ($CLINVAR_AA_ON) {
 } else {
     warn "WARN: ClinVar missense P/LP resource not found"
        . ($CLINVAR_AA_DIR ? " under $CLINVAR_AA_DIR" : " (CLINVAR_AA_DIR unset)")
-       . " — PS1/PM5 disabled. See README section 0.6.\n";
+       . ": PS1/PM5 disabled. See README section 0.6.\n";
 }
 
 #############################################################################
@@ -615,8 +615,8 @@ sub parse_call {
 
 # Zygosity from a GT string: hom (alt/alt), het (ref/alt), hem (haploid alt), ref,
 # or "" (no-call).
-# HAPLOID CALLS: DRAGEN (and GATK with -ploidy 1) emit a single-allele GT — "1" or
-# "0" — for non-PAR chrX/chrY in males and for chrM. Requiring two alleles made those
+# HAPLOID CALLS: DRAGEN (and GATK with -ploidy 1) emit a single-allele GT; "1" or
+# "0": for non-PAR chrX/chrY in males and for chrM. Requiring two alleles made those
 # calls return "", which silently cost them their zygosity (no HOM flag, no AR_hom
 # rescue, no AB_hom QC) and, worse, made a hemizygous parent invisible to load_parent
 # so an INHERITED X-linked variant was reported as de novo. A hemizygous call is a
@@ -633,7 +633,7 @@ sub zygosity {
 }
 
 # Is this genotype a complete (non-carrier) recessive genotype on its own?
-# Homozygous alt, or hemizygous alt on a haploid contig — both leave no second
+# Homozygous alt, or hemizygous alt on a haploid contig: both leave no second
 # wild-type allele, so neither is a "carrier" state.
 sub zyg_biallelic { my $z = shift // ""; return ($z eq "hom" || $z eq "hem") ? 1 : 0; }
 
@@ -671,7 +671,7 @@ sub load_scores {
 }
 
 # ── Cohort recurrent-artifact tally (internal panel-of-normals) [#11] ──
-# Scan every cohort VCF once (GENOTYPES ONLY — no CSQ parse, so it is cheap) and
+# Scan every cohort VCF once (GENOTYPES ONLY: no CSQ parse, so it is cheap) and
 # count, per chr-pos-ref-alt, how many distinct samples carry the ALT plus their
 # zygosity breakdown. Returns (\%carriers, \%hom, \%het, $n_samples). Sites-only
 # files (no sample column) contribute no carriers. Used only for large cohorts
@@ -718,7 +718,7 @@ sub cohort_artifact_call {
 # Distance into an intron from the nearest exon boundary, taken from the HGVSc offset
 # (c.1234+56A>G -> 56; c.1235-30A>G -> 30). A range keeps its closest endpoint
 # (c.100+5_100+12del -> 5). Returns undef when the annotation carries no offset, which is
-# the case for anything that is not intronic — so callers must also check the consequence.
+# the case for anything that is not intronic: so callers must also check the consequence.
 sub intron_offset {
     my ($hgvsc) = @_;
     return undef unless defined $hgvsc && $hgvsc =~ /c\./;
@@ -761,7 +761,7 @@ sub clinvar_benign {
 # ClinVar review status -> star count (0-4). Handles both the VEP CLNREVSTAT
 # underscore form ("criteria_provided,_single_submitter") and the ClinVar TSV
 # space form ("criteria provided, single submitter"). The "no assertion criteria
-# provided" string contains "criteria provided" — guarded explicitly to 0 stars.
+# provided" string contains "criteria provided": guarded explicitly to 0 stars.
 sub clinvar_stars {
     my ($s) = @_;
     return 0 unless defined $s && $s ne "";
@@ -777,15 +777,15 @@ sub clinvar_stars {
 # ── Mode-of-inheritance predicates over a panel/ACMG MOI string ──────────────
 # A gene is "recessive-capable" if its MOI mentions AR/XLR/recessive, and
 # "dominant-capable" if it mentions AD/XLD/dominant. Dual-inheritance genes
-# (e.g. "AD, AR") satisfy BOTH — handled explicitly by the callers.
+# (e.g. "AD, AR") satisfy BOTH: handled explicitly by the callers.
 #
 # PLAIN "XL" satisfies BOTH, deliberately. It is the Genes4Epilepsy vocabulary for
-# an X-linked gene whose mechanism is not split into XLD/XLR — 73 of the 1070 g4e
+# an X-linked gene whose mechanism is not split into XLD/XLR: 73 of the 1070 g4e
 # genes, including CDKL5, MECP2, ARX, IQSEC2, PCDH19, DDX3X, ATRX, SLC6A8 and FLNA.
 # Matching neither predicate (the previous behaviour) was an oversight, not a policy:
 # those genes got no HOM/CompHet flag, never qualified for the AR_hom rescue, and were
 # held to the strict dominant AF ceiling. Treating XL as dual-inheritance is the
-# clinically safe reading — dominant-capable keeps a solitary het (these genes act
+# clinically safe reading: dominant-capable keeps a solitary het (these genes act
 # dominantly in heterozygous females), recessive-capable earns a hemizygous/homozygous
 # call its HEM/HOM flag and the AR_hom rescue. Same rule the "AD, AR" genes use.
 # "XLR"/"XLD" keep their specific meaning: \bXL\b cannot match either.
@@ -811,7 +811,7 @@ sub carrier_strong_evidence {
 
 # A candidate whose only classification is Benign / Likely-benign (ACMG auto-class
 # or a non-conflicting ClinVar B/LB that is not itself P/LP). Excluded from the
-# carrier-only tier — a benign carrier is noise, not a candidate.
+# carrier-only tier: a benign carrier is noise, not a candidate.
 sub is_benign_class {
     my ($d) = @_;
     return 1 if lc($d->{acmg_class} // "") =~ /benign/;
@@ -839,7 +839,7 @@ sub _key_gt {
 # (PM5). The innermost level records WHICH variant contributed each classification,
 # which is what lets PS1 exclude the candidate's own ClinVar record (see aa_best_stars). A
 # single-codon in-frame deletion of that residue also triggers PM5 (it is a
-# different protein change at the same P/LP residue) — see the call site.
+# different protein change at the same P/LP residue): see the call site.
 sub load_clinvar_aa {
     my ($file) = @_;
     my %resid;
@@ -858,7 +858,7 @@ sub load_clinvar_aa {
         # Keyed per SOURCE VARIANT (cols 3-6: Chr, PositionVCF, Ref, Alt), not just per
         # amino-acid change. PS1 requires a PREVIOUSLY established variant, so the record
         # belonging to the variant under classification has to be identifiable and
-        # excluded — otherwise a variant that is itself ClinVar P/LP matches its own
+        # excluded: otherwise a variant that is itself ClinVar P/LP matches its own
         # submission and earns PS1 on top of PP5 from that one record.
         my ($vchr,$vpos,$vref,$valt) = @f[2,3,4,5];
         my $vid = (defined $vchr && defined $vpos && defined $vref && defined $valt)
@@ -902,7 +902,7 @@ sub homopolymer_context {
     return $hp_cache{$key} = $hp;
 }
 
-# Calibrated PP3/BP4 thresholds — AlphaMissense (Bergquist et al., GIM 2025) and
+# Calibrated PP3/BP4 thresholds: AlphaMissense (Bergquist et al., GIM 2025) and
 # REVEL (Pejaver et al., AJHG 2022).
 my %AMP = (
     am_pp3_strong=>0.990, am_pp3_mod=>0.906, am_pp3_supp=>0.792,   # AM PP3 (no BP4 strong)
@@ -911,10 +911,10 @@ my %AMP = (
     rv_bp4_strong=>0.016, rv_bp4_mod=>0.183, rv_bp4_supp=>0.290,   # REVEL BP4
 );
 
-# Automated ACMG/AMP classification (TRIAGE ONLY — not a final clinical call).
+# Automated ACMG/AMP classification (TRIAGE ONLY: not a final clinical call).
 # Criteria are combined per $COMBINER: Tavtigian-2020 points (default) or the
-# categorical ACMG 2015 rules. PP3/BP4 come from a single CALIBRATED tool —
-# AlphaMissense primary, REVEL fallback — graded Supporting/Moderate/Strong with
+# categorical ACMG 2015 rules. PP3/BP4 come from a single CALIBRATED tool,
+# AlphaMissense primary, REVEL fallback: graded Supporting/Moderate/Strong with
 # a REVEL direction-conflict veto (categorical counting squashes BP4_Moderate to
 # supporting-benign, since 2015 has no benign-Moderate tier; the points sum keeps
 # its true -2). A Pangolin score >= $SPLICE_SUPP adds splice PP3_Supporting when
@@ -926,7 +926,7 @@ sub acmg_classify {
 
     # Pathogenic criteria
     # PVS1 with partial Tayoun-2018 granularity: start_lost caps at MODERATE
-    # (PVS1_Moderate) — translation can re-initiate at a downstream or alternative
+    # (PVS1_Moderate): translation can re-initiate at a downstream or alternative
     # start, so a lost canonical start codon is weaker evidence than a mid-gene
     # truncation. A compound consequence carrying another LoF atom (e.g.
     # start_lost&splice_donor_variant) still earns full PVS1 through that atom.
@@ -940,7 +940,7 @@ sub acmg_classify {
     push @P, "PVS1"          if $pvs1;
     push @P, "PVS1_Moderate" if $pvs1_mod;
     # De novo: PS2 (confirmed-quality trio DN) / PM6 (assumed). BOTH now require a
-    # dominant-capable panel MOI (AD/XLD/XL/dual) — de novo occurrence of a het
+    # dominant-capable panel MOI (AD/XLD/XL/dual): de novo occurrence of a het
     # supports nothing under pure-recessive inheritance. The duo path always had
     # this gate; the trio path previously skipped it. Under a panel with MOI=NA
     # (plain-symbol custom list) neither fires, matching the documented PM6 rule.
@@ -954,14 +954,14 @@ sub acmg_classify {
     # PM4 is evidence for a protein-length change; PVS1 already covers the loss-of-
     # function reading of the same event. VEP compound terms make them collide
     # (start_lost&inframe_deletion, frameshift_variant&stop_lost) because $lof_type is
-    # matched per '&'-atom while this regex matches the whole string — two ACMG lines
+    # matched per '&'-atom while this regex matches the whole string: two ACMG lines
     # from one protein-terminus effect, which pushes an LP call to Pathogenic.
     push @P, "PM4" if !$pvs1 && !$pvs1_mod && $v{consequence} =~ /inframe_(insertion|deletion)|stop_lost/;
     # PM2 at the configured strength (see $PM2_STRENGTH). Written as PM2_Supporting when
     # downgraded so the criteria string says which reading produced the class.
     # "Absent from gnomAD" is only assertable where gnomAD actually looked. A splice
     # probe rescued from outside the MANE-restricted resource has AN=0 because the position
-    # is not IN the resource, not because the allele is unobserved — awarding PM2 there
+    # is not IN the resource, not because the allele is unobserved: awarding PM2 there
     # would manufacture pathogenic evidence out of an annotation gap. Scoped to probe rows
     # and to whitelisted intronic rows beyond the footprint ($v{uncovered}, see
     # $GNOMAD_INTRON_PAD), so ordinary candidates inside the footprint are unaffected.
@@ -969,10 +969,10 @@ sub acmg_classify {
     push @P, ($PM2_STRENGTH eq 'moderate' ? "PM2" : "PM2_Supporting")
         if $ac_assertable && $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;   # absent or singleton
     # PP5 requires >=1 review star, like the other ClinVar consumers in this file
-    # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6) — the one deliberate
+    # (Stage-1 exemption, ACMG-SF tier, carrier tier, BP6): the one deliberate
     # exception is the star-less ClinVar RESCUE arm, which only keeps a row for
     # curation and asserts no ACMG criterion. Without the gate a single
-    # 0-star "no assertion criteria provided" submission — ~16% of the P/LP corpus —
+    # 0-star "no assertion criteria provided" submission: ~16% of the P/LP corpus,
     # supplied the criterion that lifts an LP call to Pathogenic.
     push @P, "PP5" if clinvar_pathogenic($v{clnsig}) && ($v{clnstar} // 0) >= 1;
     # PS1 (same AA change P/LP) or PM5 (different change, same residue P/LP), from
@@ -1003,7 +1003,7 @@ sub acmg_classify {
     }
     # Splice PP3, SUPPORTING ONLY: Pangolin >= $SPLICE_SUPP is calibrated splice-
     # damage evidence (SpliceAI-analogous 0.2, Walker 2023; no published Pangolin
-    # calibration supports a higher tier). Never stacked on full PVS1 — a canonical
+    # calibration supports a higher tier). Never stacked on full PVS1: a canonical
     # splice LoF is one splicing effect, not two evidence lines (ClinGen SVI).
     # A missense-based PP3 grade keeps precedence (max, not sum), and a splice
     # signal at/above the boundary vetoes computational-benign BP4, the same
@@ -1022,10 +1022,10 @@ sub acmg_classify {
     # PM1: the variant falls in a PERv1 pathogenic-variant-enriched region naming
     # THIS gene (Perez-Palma et al., Genome Res 2020, whose stated application is PM1).
     # Two arms, both published:
-    #   PERv1_direct  — enrichment computed on this gene. Graded by its own fold
+    #   PERv1_direct : enrichment computed on this gene. Graded by its own fold
     #                   enrichment at the Tavtigian-2018 calibration the paper cites:
     #                   >= 18.7 counts at Strong, else Moderate.
-    #   PERv1_paralog — enrichment computed across the paralog family alignment and
+    #   PERv1_paralog: enrichment computed across the paralog family alignment and
     #                   assigned to every member, including members carrying none of
     #                   the underlying variants. This is the paper's headline arm
     #                   (1,252 genes vs 215) and the one its held-out de novo test
@@ -1048,8 +1048,8 @@ sub acmg_classify {
     # PP2: missense in a gene with a low rate of benign missense variation, from
     # gnomAD v4.1.1 missense constraint (mis.oe < $PP2_MIS_OE on the MANE transcript;
     # constraint outliers already excluded at load). PP2 counts INDEPENDENTLY of PP3
-    # (both are legitimate, separate ACMG lines — gene-level missense intolerance vs the
-    # variant-level predictor — and ACMG 2015 permits combining them). It is still
+    # (both are legitimate, separate ACMG lines: gene-level missense intolerance vs the
+    # variant-level predictor: and ACMG 2015 permits combining them). It is still
     # suppressed when BP4 fired: a variant the calibrated tool predicts BENIGN must not
     # also collect gene-level pathogenic support (a genuine contradiction, not just
     # correlation). To let PP2 fire even alongside BP4, drop the "!$bp4" guard.
@@ -1094,8 +1094,8 @@ sub acmg_classify {
     $bp++ if $bp4 eq "moderate" || $bp4 eq "supporting";
 
     # Evidence points (Tavtigian et al., Genet Med 2020): ALWAYS computed and
-    # reported, whichever combiner names the class. BP4_Moderate — squashed to
-    # supporting-benign by the tierless 2015 counting above — carries its true
+    # reported, whichever combiner names the class. BP4_Moderate: squashed to
+    # supporting-benign by the tierless 2015 counting above: carries its true
     # -2 here (one extra point beyond the -1 already counted in $bp). BA1 is
     # scored -8 (triage deviation; see $COMBINER).
     my $points = 8*$pvs + 4*$ps + 2*$pm + $pp
@@ -1108,7 +1108,7 @@ sub acmg_classify {
                : $points >= 0  ? "VUS"
                : $points >= -6 ? "Likely_benign"
                :                 "Benign";
-    } else {   # 'categorical' — ACMG 2015 Table 5, kept for comparison/audit
+    } else {   # 'categorical': ACMG 2015 Table 5, kept for comparison/audit
         my $path = ( ($pvs && ($ps >= 1 || $pm >= 2 || ($pm >= 1 && $pp >= 1) || $pp >= 2))
                    || $ps >= 2
                    || ($ps >= 1 && ($pm >= 3 || ($pm >= 2 && $pp >= 2) || ($pm >= 1 && $pp >= 4))) );
@@ -1182,14 +1182,14 @@ sub resolve_variant {
     my ($v, $work) = @_;
     (my $norm = $v) =~ s/[:\-]/ /g;
     my @f = split ' ', $norm;
-    # chr-pos-ref-alt (4 fields) — VCF-style, POS = first REF base.
+    # chr-pos-ref-alt (4 fields): VCF-style, POS = first REF base.
     if (@f == 4 && $f[1] =~ /^\d+$/
         && $f[2] =~ /^[ACGTNacgtn]+$/ && $f[3] =~ /^[ACGTNacgtn*]+$/) {
         my $chrom = ($f[0] =~ /^chr/i) ? $f[0] : "chr$f[0]";
         printf "[lookup] coordinates: %s:%s %s>%s\n", $chrom, $f[1], uc $f[2], uc $f[3];
         return ($chrom, $f[1], uc $f[2], uc $f[3]);
     }
-    # chr-start-end-ref-alt (5 fields) — .candidatos column order; POS = start,
+    # chr-start-end-ref-alt (5 fields): .candidatos column order; POS = start,
     # END ignored (it's start+len(REF)-1). vep_annotate.sh left-aligns with
     # `bcftools norm -f`, so a VCF-style anchored REF/ALT is what's expected here.
     if (@f == 5 && $f[1] =~ /^\d+$/ && $f[2] =~ /^\d+$/
@@ -1207,7 +1207,7 @@ sub resolve_variant {
 sub resolve_hgvs {
     my ($v, $work) = @_;
     print "[lookup] HGVS input: $v\n";
-    print "[lookup] resolving via Ensembl REST ($ENSEMBL_REST) — only the variant notation is sent, no patient data.\n";
+    print "[lookup] resolving via Ensembl REST ($ENSEMBL_REST): only the variant notation is sent, no patient data.\n";
     (my $enc = $v) =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
     my $url  = "$ENSEMBL_REST/variant_recoder/human/$enc?content-type=application/json&vcf_string=1";
     my $json = "$work/rest.json";
@@ -1272,7 +1272,7 @@ sub build_and_annotate_lookup {
     # Splice scoring: a single-variant consult is meant to report EVERYTHING, so
     # (unless --no-splice) run Pangolin on the variant(s) inline and drop the
     # scores where the main loop expects them (Lookup.<tag>.<panel>.pangolin.tsv).
-    # Degrades gracefully — a missing env/reference or a Pangolin failure just
+    # Degrades gracefully: a missing env/reference or a Pangolin failure just
     # leaves pangolin_score blank; it never aborts the consult.
     unless ($NO_SPLICE) {
         my $tsv = "Lookup.$tag.$PANEL_TAG.pangolin.tsv";
@@ -1283,7 +1283,7 @@ sub build_and_annotate_lookup {
 
 # Score the annotated lookup variant(s) with Pangolin and write parse_pangolin's
 # per-variant max|delta| map to $tsv (keyed chr-pos-ref-alt, matching the main
-# loop's $my_id — built from the NORMALIZED annotated VCF, not the raw input).
+# loop's $my_id: built from the NORMALIZED annotated VCF, not the raw input).
 # Returns 1 on success; on any problem warns and returns 0 (pangolin_score stays
 # blank). Env overrides mirror run_filtering.sh: $CONDA_BASE / $PANGOLIN_ENV /
 # $PANGOLIN_FASTA / $PANGOLIN_DB.
@@ -1294,7 +1294,7 @@ sub run_pangolin_lookup {
     my $fa    = $ENV{PANGOLIN_FASTA} // "$ENV{HOME}/vep_refs/pangolin/GRCh38.primary_assembly.genome.fa";
     my $db    = $ENV{PANGOLIN_DB}    // "$ENV{HOME}/vep_refs/pangolin/gencode.v38.annotation.db";
     unless (-e "$conda/etc/profile.d/conda.sh" && -e $fa && -e $db) {
-        warn "[lookup] Pangolin skipped — conda env or reference not found (pangolin_score stays blank; use --no-splice to silence).\n";
+        warn "[lookup] Pangolin skipped: conda env or reference not found (pangolin_score stays blank; use --no-splice to silence).\n";
         return 0;
     }
 
@@ -1332,7 +1332,7 @@ sub run_pangolin_lookup {
 #############################################################################
 # Discover trios / duos from filenames
 #
-# Role-suffix naming convention (single source of truth — see sample_role):
+# Role-suffix naming convention (single source of truth: see sample_role):
 #     <FAMILY>-P = proband, <FAMILY>-M = mother, <FAMILY>-F = father.
 # Each role shares the FAMILY prefix, so <FAMILY>-P/-M/-F form one trio. A
 # sample whose name does not end in -P/-M/-F is ignored by auto-discovery (it
@@ -1365,7 +1365,7 @@ sub discover_families {
     return \@recs;
 }
 
-# Self-test of the naming logic above — no VCFs or reference files required.
+# Self-test of the naming logic above: no VCFs or reference files required.
 sub run_naming_selftest {
     my @ok;
     my $is = sub {
@@ -1398,7 +1398,7 @@ sub run_naming_selftest {
     exit($fail ? 1 : 0);
 }
 
-# Self-test of the cohort recurrent-artifact filter [#11] — builds a synthetic
+# Self-test of the cohort recurrent-artifact filter [#11]: builds a synthetic
 # 12-sample cohort of tiny sites+GT VCFs (no VEP/reference files needed), then
 # checks the carrier tally and the drop decision, including the founder-safety
 # guard (recurrent-but-in-gnomAD is KEPT) and the small-cohort guard (N<min = off).
@@ -1541,7 +1541,7 @@ my @COLS = qw(
     Association MOI GDV
 );
 
-# Cohort recurrent-artifact state [#11] — built lazily on the first FINAL-pass
+# Cohort recurrent-artifact state [#11]: built lazily on the first FINAL-pass
 # proband (see below), and only for a real cohort auto-analyzed together. A single
 # variant (-v/--lookup), a forced/single proband (--proband), or a run of fewer than
 # $COHORT_MIN probands has no cohort to compare against, so the filter stays OFF.
@@ -1550,7 +1550,7 @@ my $cohort_on    = 0;
 my $cohort_built = 0;
 
 # Every final-pass candidate row from every proband, each prefixed with its sample id.
-# Written once, after the loop, as batch.<panel>.candidatos — one file to open when the
+# Written once, after the loop, as batch.<panel>.candidatos: one file to open when the
 # question is "what did this batch turn up" rather than "what did this patient turn up".
 my @batch_rows;
 my (@batch_prov, %batch_prov_seen);   # provenance header for batch.<panel>.candidatos
@@ -1581,7 +1581,7 @@ foreach my $proband (@probands) {
         # acting threshold matches the one documented. (Counting probands for
         # eligibility while dividing by all VCFs silently diluted the fraction ~3x on
         # trio cohorts: an artifact in 4 of 10 probands scored 4/30 = 13%, under the
-        # 25% bar.) Parents belong in the tally — a mapping artifact is a property of
+        # 25% bar.) Parents belong in the tally: a mapping artifact is a property of
         # the assay, not of affected status, so every extra sample sharpens it.
         my $eligible = (!@force_probands && @probands >= 2 && @files >= $COHORT_MIN);
         if ($eligible) {
@@ -1589,11 +1589,11 @@ foreach my $proband (@probands) {
             $cohort_on = ($cohort_n >= $COHORT_MIN) ? 1 : 0;
         }
         if ($cohort_on) {
-            printf "cohort artifact filter: ON — N=%d samples; drop if carried by >=%d samples AND >=%d%% of cohort AND absent from gnomAD (AC=0)%s\n",
+            printf "cohort artifact filter: ON; N=%d samples; drop if carried by >=%d samples AND >=%d%% of cohort AND absent from gnomAD (AC=0)%s\n",
                    $cohort_n, $COHORT_MIN_CARRIERS, int($COHORT_MAX_FRAC*100 + 0.5),
                    $KEEP_COHORT_ARTIFACTS ? " (keep+tag mode)" : "";
         } else {
-            printf "cohort artifact filter: OFF — %s\n",
+            printf "cohort artifact filter: OFF; %s\n",
                    (@force_probands ? "forced/single proband (--proband)"
                     : @probands < 2 ? "single proband"
                     : "only ".scalar(@files)." sample(s); need >=$COHORT_MIN");
@@ -1640,7 +1640,7 @@ foreach my $proband (@probands) {
         per           => resolve($col,'PER'),
     );
 
-    # [#3] Assert critical fields resolved — fail loudly, never silently pass-all.
+    # [#3] Assert critical fields resolved: fail loudly, never silently pass-all.
     my @critical = qw(gene transcript consequence cadd g_ac g_an);
     my @missing = grep { !defined $i{$_} } @critical;
     die "FATAL: CSQ fields not found in $pfile: @missing\n".
@@ -1679,7 +1679,7 @@ foreach my $proband (@probands) {
 
         my $my_id = "$chr-$start-$ref-$alt";
 
-        # Consensus provenance (INFO-level; present only for consensus.sh output —
+        # Consensus provenance (INFO-level; present only for consensus.sh output,
         # DRAGEN VCFs lack these, leaving the columns empty). GT_SOURCE flags
         # genotypes borrowed from a non-DeepVariant caller (which also lack VAF).
         my ($gtsrc)    = $info =~ /(?:^|;)GT_SOURCE=([^;]*)/; $gtsrc    = defined $gtsrc    ? $gtsrc    : "";
@@ -1744,7 +1744,7 @@ foreach my $proband (@probands) {
 
             # [#6] ACMG-SF genes must reach Pangolin too. The SF tier itself doesn't use a
             # splice score, but without this every GDV=Incidental row carried a blank
-            # pangolin_score and could never earn BP7 or the splice rescue — a secondary
+            # pangolin_score and could never earn BP7 or the splice rescue: a secondary
             # finding was structurally denied the evidence a primary candidate gets.
             my $sf_structural = 0;
             if ($in_acmg && !$cand_structural
@@ -1752,12 +1752,12 @@ foreach my $proband (@probands) {
                 $sf_structural = ($clinvar_established || $freq <= $SF_FREQ_MAX) ? 1 : 0;
             }
 
-            # [#5] Splice DISCOVERY probe — an intronic/synonymous variant that no gate
+            # [#5] Splice DISCOVERY probe: an intronic/synonymous variant that no gate
             # would ever admit, scored so Pangolin can find a splice disruption in it.
             # Bounded by intron distance and a strict rarity ceiling (see $SPLICE_PROBE).
             # $g_an > 0 means the position actually EXISTS in the gnomAD resource. This is
             # load-bearing, not a nicety. The custom VCF is gnomAD.joint.v4.1.**mane**, i.e.
-            # MANE transcripts plus flanks — deep intronic sequence is largely absent from
+            # MANE transcripts plus flanks: deep intronic sequence is largely absent from
             # it. A variant there gets AC=""/AN="" which this code coerces to 0, so $freq
             # computes as 0 and passes ANY rarity ceiling, and PM2 ("absent or singleton in
             # gnomAD") fires on what is really an annotation gap. Probing uncovered
@@ -1803,7 +1803,7 @@ foreach my $proband (@probands) {
             # ── PS1 / PM5 from ClinVar amino-acid evidence (>=1 star) ──
             # PS1: SAME missense change is P/LP. PM5: a DIFFERENT change at the same
             # residue is P/LP. EXTENDED: a single-codon in-frame deletion removing
-            # residue X is treated as PM5 when any missense at X is P/LP — a
+            # residue X is treated as PM5 when any missense at X is P/LP: a
             # different protein change at the same residue is pathogenic, i.e. the
             # residue is intolerant (per-ACMG this is a curatorial extension of PM5
             # beyond missense; flagged in the detail as "(in-frame del)"). Flagged
@@ -1893,7 +1893,7 @@ foreach my $proband (@probands) {
                 # stop_lost / start_lost) in a recessive (AR/XLR) panel gene is rescued even without
                 # in-silico/ClinVar support. Rationale (general, not case-specific): a biallelic
                 # (homozygous) genotype in a recessive disease gene is itself pathogenicity evidence
-                # under recessive inheritance, independent of missense predictors — which are calibrated
+                # under recessive inheritance, independent of missense predictors: which are calibrated
                 # largely on dominant/heterozygous effects and can miss true recessive alleles. Restricted
                 # to coding changes so it does NOT flood on benign homozygous intronic/polypyrimidine
                 # variants (those go through the Pangolin splice arm; truncating LoF through the LoF arm);
@@ -1913,7 +1913,7 @@ foreach my $proband (@probands) {
             # ── [#5] Splice-discovery rescue ──
             # A probe is NOT a candidate. It entered the Pangolin set only so the model
             # could look at it, and it earns a row solely on a positive splice score. A
-            # probe Pangolin scores low simply vanishes — which is what keeps the probe set
+            # probe Pangolin scores low simply vanishes: which is what keeps the probe set
             # from widening the table. Placed before the ACMG-SF block so a splice-active
             # synonymous/intronic variant in a secondary-findings gene is reported as an
             # incidental rather than being tested against the SF coding tiers it cannot meet.
@@ -1930,7 +1930,7 @@ foreach my $proband (@probands) {
                 }
             }
 
-            # ── Incidental (ACMG SF) — stringent; only if not a primary candidate ──
+            # ── Incidental (ACMG SF): stringent; only if not a primary candidate ──
             # ClinVar P/LP (>=1 star) reported regardless of frequency (known founder
             # alleles); novel LoF / >=2-strong-computational tiers require rarity.
             if (!@kept && $in_acmg) {
@@ -2102,7 +2102,7 @@ foreach my $proband (@probands) {
             # 2-tier threshold independently, so one benign criterion never blocks a
             # pathogenic call and the row reaches the curator looking clean. This is a
             # triage tool, so the class is left alone and the tension is made visible
-            # instead. BP4 is excluded on purpose — a computational prediction
+            # instead. BP4 is excluded on purpose: a computational prediction
             # disagreeing with PVS1/PM2 is routine, not a contradiction.
             push @qc, "clinvar_conflict"
                 if $acmg_class =~ /athogenic/ && $acmg_crit =~ /(?:^|,)(BP6|BS1|BS2|BA1)(?:,|$)/;
@@ -2130,7 +2130,7 @@ foreach my $proband (@probands) {
                 $hgvs = ($hgvs ne "") ? "$hgvs ($p)" : $p if $p ne "";
             }
 
-            # Recessive carrier (g4e primary AR gene, MOI from panel) — dropped later
+            # Recessive carrier (g4e primary AR gene, MOI from panel): dropped later
             # unless biallelic (hom or comp-het). Mirrors the ACMG SF AR rule [#6].
             # [#5] Recessive-carrier drop applies only to genes that are recessive
             # AND NOT also dominant. Dual-inheritance genes (MOI has AD too, e.g.
@@ -2188,7 +2188,7 @@ foreach my $proband (@probands) {
 
     # ── [#3] One MANE row per variant ──
     # A variant can annotate onto >1 MANE transcript (MANE Select + MANE Plus
-    # Clinical, or overlapping gene models — e.g. MUTYH's two transcripts). Collapse
+    # Clinical, or overlapping gene models: e.g. MUTYH's two transcripts). Collapse
     # to a single row per variant: prefer a panel-primary row, then MANE Select over
     # MANE Plus Clinical, then the most evidence arms, then a stable transcript order.
     # Skipped for --lookup consults, which report every annotation.
@@ -2202,8 +2202,8 @@ foreach my $proband (@probands) {
                         $arms,
                         -length($row->{transcript} // "") ];
             # Keyed per (variant, GENE), not per variant. Keying on coordinates alone
-            # collapsed across overlapping MANE gene models — MYH11+NDE1, HPDL+MUTYH,
-            # COL4A1+COL4A2 all co-locate in a real exome — so a panel candidate could
+            # collapsed across overlapping MANE gene models: MYH11+NDE1, HPDL+MUTYH,
+            # COL4A1+COL4A2 all co-locate in a real exome: so a panel candidate could
             # silently delete a reportable ACMG-SF incidental at the same position, and
             # the surviving row's gene reassignment corrupted the other gene's comp-het
             # tally. The MANE Select / MANE Plus Clinical duplication this collapse
@@ -2227,7 +2227,7 @@ foreach my $proband (@probands) {
         $gene_var{$row->{gene}}{$row->{vid}} = { zyg=>$row->{zyg}, mat=>$row->{mat}, pat=>$row->{pat} };
         $gene_rec{$row->{gene}} //= moi_recessive($row->{data}{MOI});
     }
-    # [#7] Homozygous / compound-het flags are a RECESSIVE concept — compute them
+    # [#7] Homozygous / compound-het flags are a RECESSIVE concept: compute them
     # only for recessive-capable genes (AR/XLR, incl. dual AD/AR). A purely dominant
     # gene carrying two independent hets never gets a spurious CompHet? label.
     my %gene_flag;
@@ -2261,11 +2261,11 @@ foreach my $proband (@probands) {
     # (rec_ar, or an ACMG-SF AR gene) that is not biallelic (hom / comp-het) is a
     # carrier. DEFAULT = DROP it (g4e reports no carriers: a single het cannot explain a
     # recessive disease, and carrier states are noise for clinical interpretation). This
-    # does NOT affect true compound hets — a gene with >=2 gate-passing hets is biallelic
+    # does NOT affect true compound hets: a gene with >=2 gate-passing hets is biallelic
     # (CompHet flag) and every such row is kept regardless. OPT-IN --keep-ar-carriers /
     # KEEP_AR_CARRIERS=1 instead SURFACES the strong solitary carriers (the carrier-only
-    # tier: kept iff strong-evidence — ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors
-    # — AND not Benign/LB; flagged flags=carrier-only), for a targeted second-hit
+    # tier: kept iff strong-evidence; ClinVar P/LP >=1*, HC-LoF, or >=2 strong predictors
+    # AND not Benign/LB; flagged flags=carrier-only), for a targeted second-hit
     # hunt (a deep-intronic / CNV partner the exome may have missed). Dual AD/AR genes are
     # NOT rec_ar (see [#5]), so their solitary hets pass through as dominant candidates.
     unless ($LOOKUP) {
@@ -2277,7 +2277,7 @@ foreach my $proband (@probands) {
                      : (carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data}));  # opt-in: carrier-only tier
             # A dropped solitary carrier with STRONG evidence is exactly the row that
             # should prompt a second-hit hunt (deep-intronic / CNV partner the exome
-            # missed) — never delete it silently.
+            # missed): never delete it silently.
             printf "  carrier drop: %-28s %-10s strong-evidence solitary het (--keep-ar-carriers surfaces it)\n",
                    $_->{vid}, $_->{gene}
                 if !$keep && carrier_strong_evidence($_->{data}) && !is_benign_class($_->{data});
@@ -2288,7 +2288,7 @@ foreach my $proband (@probands) {
     # The gene-level verdict decides which rows are KEPT (above); the label written to
     # each row must still describe THAT row. A gene flagged HOM because one variant is
     # homozygous must not stamp "HOM" onto an independent heterozygous variant in the
-    # same gene — the row would contradict its own zygosity column and read to a curator
+    # same gene: the row would contradict its own zygosity column and read to a curator
     # as a biallelic finding. Only a hom row is labelled HOM, and a CompHet label goes to
     # the het rows that constitute it.
     for my $row (@rows) {
@@ -2309,16 +2309,16 @@ foreach my $proband (@probands) {
         # The recessive verdict and the QC/artifact flags used to occupy two separate
         # columns 4 apart in a 43-column table, so a curator scanning left to right met
         # the interpretive flag and the technical one at different times. They are one
-        # answer to one question — "is there anything about this row you should know
-        # before reading it?" — so they are one column, recessive verdict first.
+        # answer to one question: "is there anything about this row you should know
+        # before reading it?": so they are one column, recessive verdict first.
         $row->{data}{flags} = join(";", grep { defined && $_ ne "" }
                                         ($row->{rec_label}, $row->{qc}));
     }
 
     # ── Write output ──
     # A single-variant consult (-v / --lookup) writes ONLY the transposed,
-    # human-readable view to Lookup.<tag>.<panel>.candidatos — one
-    # "field <TAB> value" line per column, "." for empty — and echoes it to
+    # human-readable view to Lookup.<tag>.<panel>.candidatos: one
+    # "field <TAB> value" line per column, "." for empty: and echoes it to
     # stdout; that IS the deliverable. Normal cohort runs write the TSV
     # candidatos table + run summary as before.
     # The "Lookup." prefix is mandatory: -v already builds its VCF under that
@@ -2346,7 +2346,7 @@ foreach my $proband (@probands) {
         }
         close OUT;
         if (@rows) { print "  -> $rf (", scalar(@rows), " variant row(s))\n"; }
-        else       { print "  no reportable MANE annotation — re-run with --all-transcripts (empty $rf)\n"; }
+        else       { print "  no reportable MANE annotation: re-run with --all-transcripts (empty $rf)\n"; }
     } else {
         # ── Write candidatos (primary + Incidental, distinguished by the GDV column) ──
         open OUT, ">$proband.$PANEL_TAG.candidatos" or die "out: $!";
@@ -2374,7 +2374,7 @@ foreach my $proband (@probands) {
             $by_flag{$row->{rec_label}}++ if ($row->{rec_label} // "") ne "";
         }
         print  "  -> $proband.$PANEL_TAG.candidatos\n";
-        # structural-pass is reported as UNIQUE VARIANTS (keys %emit) — a per-CSQ-annotation
+        # structural-pass is reported as UNIQUE VARIANTS (keys %emit): a per-CSQ-annotation
         # count would tally a variant on two MANE transcripts twice.
         printf "  variants: %d read | %d multiallelic-skipped | %d proband non-carrier (0/0, no-call) skipped | %d structural-pass | %d primary + %d incidental\n",
                $stat{lines}, $stat{multiallelic}, $stat{noncarrier}, scalar(keys %emit), $n_prim, $n_inc;

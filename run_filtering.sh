@@ -12,7 +12,7 @@
 #            splice consequences, >= 0.5 probes/others; PP3_Supporting >= 0.2).
 #  Cleanup:  all Pangolin scratch is deleted; only <proband>.<panel>.candidatos
 #            and the annotated VCFs (*.germline.vep.vcf.gz + .tbi + _summary.html)
-#            survive. Pangolin is therefore recomputed every run (cheap — only
+#            survive. Pangolin is therefore recomputed every run (cheap: only
 #            the few hundred structural-pass candidates).
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -23,7 +23,7 @@ set -euo pipefail
 GENES="${1:-}"
 _CF_DIR="$(dirname "$(readlink -f "$0")")"            # resolve before cd
 _CF_SITE="$_CF_DIR/site.sh"
-# Canonicalize the panel path BEFORE cd — otherwise a relative panel resolves
+# Canonicalize the panel path BEFORE cd: otherwise a relative panel resolves
 # against $WORKDIR (or silently falls back to a same-named file in the repo).
 [[ -n "$GENES" ]] && GENES="$(readlink -f "$GENES")"
 cd "${WORKDIR:-$_CF_DIR}"
@@ -37,7 +37,7 @@ GENES_ARGS=()
 [[ -n "$GENES" ]] && GENES_ARGS=(--list "$GENES")   # filtering_r.pl takes the panel via -l/--list only
 FWD=("${PROBAND_ARGS[@]+"${PROBAND_ARGS[@]}"}" "${GENES_ARGS[@]+"${GENES_ARGS[@]}"}")
 
-# Configurable environment — all paths come from site.sh (override in an untracked
+# Configurable environment: all paths come from site.sh (override in an untracked
 # site.env; see README section 0). Sourced via the SCRIPT's real directory because we
 # have already cd'd into $WORKDIR above.
 source "$_CF_SITE"
@@ -58,7 +58,7 @@ for csv in *.pangolin_input.csv; do
     # Zero structural-pass variants: write the (legitimately) empty score map
     # directly instead of invoking Pangolin on an empty set.
     if [ "$(wc -l < "$csv")" -le 1 ]; then
-        echo "[pangolin] $proband: no variants to score — writing empty score map"
+        echo "[pangolin] $proband: no variants to score; writing empty score map"
         : > "$tsv"
         continue
     fi
@@ -70,8 +70,8 @@ for csv in *.pangolin_input.csv; do
     # An empty score map must NOT survive into pass 2. filtering_r.pl switches to its
     # final pass on the mere EXISTENCE of this file, so a Pangolin run that exits 0 but
     # scores nothing (missing GPU, bad refs, empty parse) would produce a complete,
-    # successful-looking candidatos table with every pangolin_score blank — the splice
-    # rescue arm silently dead and BP7 never firing — and cleanup would then delete the
+    # successful-looking candidatos table with every pangolin_score blank: the splice
+    # rescue arm silently dead and BP7 never firing: and cleanup would then delete the
     # evidence. Remove the stub and fail loudly instead.
     if [ "$scored" -eq 0 ] && [ "$(wc -l < "$csv")" -gt 1 ]; then
         rm -f -- "$tsv"

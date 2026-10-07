@@ -3,7 +3,7 @@
 #
 # This pipeline depends on several large external resources (VEP + cache + plugin data,
 # custom gnomAD/ClinVar VCFs, Pangolin, the ClinVar amino-acid tables). Nothing about
-# WHERE you put them is baked into the code — every path below can be overridden by
+# WHERE you put them is baked into the code: every path below can be overridden by
 # exporting it beforehand, or by creating an untracked `site.env` next to this file:
 #
 #   # site.env
@@ -13,7 +13,7 @@
 #   PANGOLIN_ENV=pangolin
 #
 # See README section 0 for how to obtain each resource. The defaults are the layout
-# this pipeline was developed against — a starting point, not a requirement.
+# this pipeline was developed against: a starting point, not a requirement.
 
 CF_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 export CF_REPO

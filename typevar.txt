@@ -1,4 +1,4 @@
-# Consequence whitelist — ATOMIC VEP/Sequence Ontology terms only.
+# Consequence whitelist: ATOMIC VEP/Sequence Ontology terms only.
 # consequence_ok() splits VEP's Consequence on '&' and looks up each atom, so
 # compound entries ("missense_variant&splice_region_variant") can never match and
 # do not belong here. Deliberately absent: intron_variant and synonymous_variant

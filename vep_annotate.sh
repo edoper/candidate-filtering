@@ -21,7 +21,7 @@
 #  Notes:
 #    - Auto-detects chr vs no-chr convention in input and normalizes to 'chr'
 #      (required because the gnomAD_min custom VCF uses 'chr' prefix).
-#    - Uses system Perl 5.34 (/usr/bin/perl) — DOES NOT activate vep-loftee
+#    - Uses system Perl 5.34 (/usr/bin/perl): DOES NOT activate vep-loftee
 #      conda env (its Perl 5.32 is missing List::MoreUtils).
 #    - LD_PRELOAD ~/htslib/libhts.so resolves runtime symbols for LOFTEE's
 #      Bio::DB::BigFile.so which does not link to libhts.
@@ -34,7 +34,7 @@ OUTPUT="${2:?Usage: $0 <input.vcf[.gz]> <output.vcf.gz>}"
 
 # ── Paths ──
 # VEP/VEP_DATA/VEP_REFS/VEP_PLUGINS come from site.sh (override in an untracked
-# site.env — see README section 0). Nothing here is tied to one machine.
+# site.env: see README section 0). Nothing here is tied to one machine.
 . "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/site.sh"
 GNOMAD_VCF="${GNOMAD_VCF:-$VEP_REFS/gnomAD_min/gnomAD.joint.v4.1.mane.all.vcf.gz}"
 CLINVAR_VCF="${CLINVAR_VCF:-$VEP_REFS/clinvar/clinvar.chr.vcf.gz}"
@@ -42,8 +42,8 @@ CADD_SNV="${CADD_SNV:-$VEP_REFS/CADD/whole_genome_SNVs.tsv.gz}"            # CAD
 CADD_INDEL="${CADD_INDEL:-$VEP_REFS/CADD/gnomad.genomes.r4.0.indel.tsv.gz}" # CADD GRCh38 v1.7 indels
 # PERv1 pathogenic-variant-enriched regions for ACMG PM1 (Perez-Palma, Genome Res
 # 2020). GRCh38 / MANE Select. Carries BOTH arms of the published method:
-#   PERv1_direct  — enrichment computed on that gene (251 PERs / 215 genes in v1)
-#   PERv1_paralog — enrichment computed across the paralog family alignment and
+#   PERv1_direct : enrichment computed on that gene (251 PERs / 215 genes in v1)
+#   PERv1_paralog: enrichment computed across the paralog family alignment and
 #                   assigned to every member (465 PERs / 1,252 genes) -- the
 #                   paper's headline result and the arm its held-out de novo
 #                   validation was run on.
@@ -57,7 +57,7 @@ export PERL5LIB="$PERL5LIB_EXTRA:${PERL5LIB:-}"
 [ -e "$HTSLIB_SO" ] && export LD_PRELOAD="$HTSLIB_SO${LD_PRELOAD:+:$LD_PRELOAD}"
 
 # ── Sanity checks ──
-[[ -x "$VEP"        ]] || { echo "ERROR: VEP not found at $VEP — set VEP/VEP_REFS in site.env (README section 0)" >&2; exit 1; }
+[[ -x "$VEP"        ]] || { echo "ERROR: VEP not found at $VEP; set VEP/VEP_REFS in site.env (README section 0)" >&2; exit 1; }
 [[ -s "$GNOMAD_VCF" ]] || { echo "ERROR: gnomAD custom VCF not found: $GNOMAD_VCF" >&2; exit 1; }
 [[ -s "$CADD_SNV"   ]] || { echo "ERROR: CADD SNV file not found: $CADD_SNV" >&2; exit 1; }
 [[ -s "$CADD_INDEL" ]] || { echo "ERROR: CADD indel file not found: $CADD_INDEL" >&2; exit 1; }
@@ -67,7 +67,7 @@ if [[ -s "$PER_BED" ]]; then
     PER_CUSTOM=(--custom "file=$PER_BED,short_name=PER,format=bed,type=overlap")
 else
     PER_CUSTOM=()
-    echo "NOTE: PERv1 BED not found ($PER_BED) — ACMG PM1 will not be annotated." >&2
+    echo "NOTE: PERv1 BED not found ($PER_BED); ACMG PM1 will not be annotated." >&2
 fi
 
 if ! /usr/bin/perl -MList::MoreUtils -MBio::DB::HTS -MBio::DB::BigFile -e1 2>/dev/null; then
@@ -84,14 +84,14 @@ FIRST_CHR=$(set +o pipefail; bcftools query -f '%CHROM\n' "$INPUT" 2>/dev/null |
 CLEANUP=()
 trap 'rm -f -- "${CLEANUP[@]+"${CLEANUP[@]}"}"' EXIT
 if [[ "$FIRST_CHR" == chr* ]]; then
-  echo "[vep] Input uses 'chr' prefix — no normalization needed"
+  echo "[vep] Input uses 'chr' prefix: no normalization needed"
   VEP_INPUT="$INPUT"
 else
-  echo "[vep] Input lacks 'chr' prefix — normalizing to temp file"
+  echo "[vep] Input lacks 'chr' prefix: normalizing to temp file"
   VEP_INPUT="$(mktemp --suffix=.vcf.gz)"
   CLEANUP+=("$VEP_INPUT")
 
-  # GRCh38 contig lengths (gnomAD canonical) — added to header so VEP/bcftools
+  # GRCh38 contig lengths (gnomAD canonical): added to header so VEP/bcftools
   # don't emit warnings about undefined contigs.
   read -r -d '' CONTIGS <<'EOF' || true
 ##contig=<ID=chr1,length=248956422,assembly=GRCh38>
@@ -141,12 +141,12 @@ fi
 # allele, and both store indels in minimal left-aligned form. Splitting a multiallelic
 # record without -f leaves the split alleles in the parent record's padded, non-minimal
 # representation (chr1 100 AT ATT,A -> AT>ATT, where gnomAD holds the same allele at
-# 101 T>TT), so the join silently misses. The variant then reports AC=0 — which this
-# pipeline reads as "absent from gnomAD" — and collects PM2 for it. Indels were hit
+# 101 T>TT), so the join silently misses. The variant then reports AC=0: which this
+# pipeline reads as "absent from gnomAD": and collects PM2 for it. Indels were hit
 # roughly 1.6x as often as SNVs before this was fixed.
 #
 # -f re-aligns and trims to the reference. NOTE: with -f, bcftools norm defaults to
-# --check-ref e — a single REF/reference mismatch ABORTS the run. Deliberate: a
+# --check-ref e: a single REF/reference mismatch ABORTS the run. Deliberate: a
 # mismatched build or corrupt record must stop a clinical annotation loudly, not
 # be silently re-annotated around.
 echo "[vep] Splitting multiallelic sites + left-aligning (bcftools norm -m-any -f)"
@@ -171,7 +171,7 @@ CF_GIT=$(git -C "$CF_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 # that would otherwise be triaged as real. Sarek consensus.sh output is already
 # PASS-only (no-op there). KEEP_NONPASS=1 opts out (e.g. to inspect a known call).
 if [[ "${KEEP_NONPASS:-0}" == 1 ]]; then
-    echo "[vep] KEEP_NONPASS=1 — non-PASS records are NOT removed" >&2
+    echo "[vep] KEEP_NONPASS=1: non-PASS records are NOT removed" >&2
     PASS_ARGS=()
 else
     N_NONPASS=$(bcftools view -H -e 'FILTER="PASS" || FILTER="."' "$VEP_INPUT" | wc -l)
@@ -192,7 +192,7 @@ if [ -s "${REF_FASTA:-}" ]; then
         | bcftools norm -m-any -f "$REF_FASTA" -Ou \
         | bcftools annotate -h "$PROV_HDR" -Oz -o "$NORM_INPUT"
 else
-    echo "[vep] WARNING: REF_FASTA unset or missing — splitting WITHOUT left-alignment." >&2
+    echo "[vep] WARNING: REF_FASTA unset or missing; splitting WITHOUT left-alignment." >&2
     echo "[vep]          Indels may miss the gnomAD/ClinVar exact-match join (spurious AC=0 -> PM2)." >&2
     echo "[vep]          Set REF_FASTA in site.env to a chr-named GRCh38 FASTA." >&2
     bcftools view "${PASS_ARGS[@]}" "$VEP_INPUT" -Ou \
