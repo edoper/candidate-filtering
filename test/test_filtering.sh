@@ -22,6 +22,10 @@
 #   11. audit fixes (2026-09-29)      : 0/0 + no-call proband rows skipped, no PS1/PM5 on
 #                                       frameshift/start_lost, no PP3 on PVS1_Moderate, trio cis
 #                                       hets are carriers, no duo PM6 (with a ClinVar AA fixture)
+#   12. update_panel.sh               : GDV from ClinGen, removal rule, overrides (offline)
+#   13. low-quality triage (2026-10-12): DP/AB/ALT-read/unconfirmed rules -> .lowqual, DP
+#                                       fallback from AD, legacy rescue records skipped,
+#                                       parents never triaged, median-depth WARNING
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -864,6 +868,79 @@ if bash "$REPO/update_panel.sh" --g4e "$UD/EpilepsyGenes_v2099-09.tsv" --clingen
 else
     bad "update_panel.sh failed on fixtures"; tail -5 "$UD/up.log" | sed 's/^/      /'
 fi
+
+# ─────────────── 13: low-quality triage + legacy rescue records [#12] ───────────────
+echo "== 13. low-quality triage (.lowqual), DP fallback, legacy rescue records, depth warning =="
+LD="$(mktemp -d)"; WD13="$(mktemp -d)"
+trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD" "$ED" "$DD" "$AAD" "$UD" "$LD" "$WD13"' EXIT
+for d in "$LD" "$WD13"; do
+  for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+           mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
+      ln -sf "$REPO/$f" "$d/$f"
+  done
+done
+# <pos> <ref> <alt> <info-prefix> <format> <sample> <gene> [aa-pos]
+lrow() { printf 'chr2\t%s\t.\t%s\t%s\t500\tPASS\t%sCSQ=%s\t%s\t%s\n' "$1" "$2" "$3" "$4" \
+                "$(csq6 "$7" missense_variant G/S "${8:-34}" 0.99 'c.100G>A')" "$5" "$6"; }
+V4='NCALLERS=4;CONF=HIGH;'; V1='NCALLERS=1;CONF=LOW;'; F='GT:AD:DP:GQ'
+{ vhead L13-P
+  lrow 1000 G A "$V4" "$F" '0/1:20,20:40:99' "$PANEL_GENE" 10   # clean -> main table
+  lrow 2000 G A "$V4" "$F" '0/1:4,4:8:60'    "$PANEL_GENE" 20   # DP 8 -> lowqual (DP<10)
+  lrow 3000 G A "$V4" "$F" '0/1:34,6:40:60'  "$PANEL_GENE" 30   # AB 0.15 -> lowqual (AB)
+  lrow 3500 G A "$V4" "$F" '1/1:0,2:12:30'   "$PANEL_GENE" 35   # 2 ALT reads -> lowqual
+  lrow 4000 G A "$V1" "$F" '0/1:20,20:40:10' "$PANEL_GENE" 40   # unconfirmed + lowGQ -> lowqual
+  lrow 4500 G A "$V1" "$F" '0/1:20,20:40:99' "$PANEL_GENE" 45   # unconfirmed but clean -> main
+  # legacy consensus record DeepVariant never called: must vanish from both tables
+  lrow 5000 G A 'NCALLERS=2;CONF=MEDIUM;GT_SOURCE=strelka;' "$F" '0/1:20,20:40:99' "$PANEL_GENE" 50
+  lrow 6000 G A "$V4" 'GT:AD:GQ' '0/1:4,4:60' "$PANEL_GENE" 60  # no FORMAT/DP: AD sum = 8 -> DP<10
+  # pure-AR gene: one clean het + one low-AB het. The low-quality call must not
+  # complete a comp-het, so the clean het is a solitary carrier (dropped).
+  lrow 7000 G A "$V4" "$F" '0/1:20,20:40:99' "$AR_GENE" 70
+  lrow 7100 G A "$V4" "$F" '0/1:36,4:40:60'  "$AR_GENE" 71
+  lrow 8000 G A "$V4" "$F" '0/1:20,20:40:99' "$PANEL_GENE" 80   # mother carries it at DP 5
+} | bgzip -c > "$LD/L13-P.germline.vep.vcf.gz"
+{ vhead L13-M; lrow 8000 G A "$V4" "$F" '0/1:3,2:5:20' "$PANEL_GENE" 80; } | bgzip -c > "$LD/L13-M.germline.vep.vcf.gz"
+{ vhead L13-F; lrow 9999 G A "$V4" "$F" '0/1:20,20:40:99' "$PANEL_GENE" 99; } | bgzip -c > "$LD/L13-F.germline.vep.vcf.gz"
+# singleton at a uniform 12x: every call passes triage, but the sample gets a WARNING
+{ vhead W13-P
+  lrow 1000 G A "$V4" "$F" '0/1:6,6:12:50' "$PANEL_GENE" 10
+  lrow 1200 G A "$V4" "$F" '0/1:6,6:12:50' "$PANEL_GENE" 12
+} | bgzip -c > "$WD13/W13-P.germline.vep.vcf.gz"
+two_pass "$LD" L13-P; two_pass "$WD13" W13-P
+LRAW=$(ls "$LD"/L13-P.*.candidatos 2>/dev/null | head -1)
+LQRAW=$(ls "$LD"/L13-P.*.lowqual 2>/dev/null | head -1)
+LOUT=$(body "$LRAW"); LQ=$(body "$LQRAW")
+if [ -z "$LOUT" ] || [ -z "$LQ" ]; then
+    bad "section 13: no candidatos/lowqual"; tail -5 "$LD/p2.log" 2>/dev/null | sed 's/^/      /'
+else
+    inmain() { [ -n "$(awk -F'\t' -v p="$1" 'NR>1 && $2==p' "$LOUT")" ]; }
+    inlq()   { awk -F'\t' -v p="$1" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $(h["start"])==p{print $1}' "$LQ"; }
+    inmain 1000 && ok "clean call kept in the main table" || bad "clean call missing from the main table"
+    inmain 4500 && ok "unconfirmed (NCALLERS=1) but clean call stays in the main table" \
+                || bad "clean unconfirmed call was moved out"
+    for pr in "2000:DP<10" "3000:AB<0.25" "3500:ALT_reads<3" "4000:unconfirmed+lowGQ" "6000:DP<10"; do
+        p=${pr%%:*}; want=${pr#*:}
+        if inmain "$p"; then bad "pos $p stayed in the main table (expected .lowqual: $want)"
+        else case ",$(inlq "$p")," in *"$want"*) ok "pos $p -> .lowqual ($(inlq "$p"))";;
+             *) bad "pos $p reason '$(inlq "$p")', expected $want";; esac; fi
+    done
+    [ "$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $(h["start"])==6000{print $(h["DP"])}' "$LQ")" = 8 ] \
+        && ok "missing FORMAT/DP filled from the AD total (8)" || bad "DP fallback from AD not applied"
+    if inmain 5000 || [ -n "$(inlq 5000)" ]; then bad "legacy rescued record (GT_SOURCE=strelka) was reported"
+    else ok "legacy rescued record skipped"; fi
+    grep -q '^## WARNING L13-P: 1 record(s) from a legacy consensus rescue arm' "$LRAW" \
+        && ok "legacy skip recorded as a WARNING line" || bad "no legacy WARNING line"
+    grep -q 'GT_SOURCE' "$LOUT" && bad "GT_SOURCE column still written" || ok "no GT_SOURCE column"
+    inmain 7000 && bad "clean AR het kept as CompHet with a low-quality partner (flags=$(ecol flags 7000 "$LOUT"))" \
+                || ok "low-quality call cannot complete a comp-het (clean AR het dropped as carrier)"
+    [ "$(ecol inheritance 8000 "$LOUT")" = IM ] && ok "parent's low-depth call still counts (inherited, not de novo)" \
+        || bad "inheritance=$(ecol inheritance 8000 "$LOUT"), expected IM (parent calls are never triaged)"
+    [ -s "$LD/batch.g4e.lowqual" ] && ok "batch.g4e.lowqual written" || bad "no batch.g4e.lowqual"
+    grep -q '^## WARNING .*median call depth' "$LRAW" && bad "depth WARNING on a 40x sample" || ok "no depth WARNING at 40x"
+fi
+WRAW=$(ls "$WD13"/W13-P.*.candidatos 2>/dev/null | head -1)
+grep -q '^## WARNING W13-P median call depth is 12x' "${WRAW:-/dev/null}" \
+    && ok "median depth 12x -> low-coverage WARNING line" || bad "no low-coverage WARNING for a 12x sample"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails TEST(S) FAILED"; exit 1; fi

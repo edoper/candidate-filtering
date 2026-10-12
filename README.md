@@ -361,6 +361,52 @@ per-proband total).
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
 
+### Stage 4: Low-quality triage (`<proband>.<panel>.lowqual`)
+
+A proband call that cannot be reviewed is moved out of the main table into
+**`<proband>.<panel>.lowqual`** (and `batch.<panel>.lowqual`): same columns, plus a leading
+`lowqual_reason`. Nothing is deleted; curators open the side file only when they choose to (for example
+when the phenotype points at one gene). The rule (constants `$TRIAGE_MIN_DP`, `$TRIAGE_MIN_AB_HET`,
+`$TRIAGE_MIN_ALT` at the top of `filtering_r.pl`):
+
+| Moved to `.lowqual` if | Reason string |
+|---|---|
+| proband `DP` < 10 | `DP<10` |
+| heterozygous ALT fraction < 0.25 | `AB<0.25` |
+| fewer than 3 ALT-supporting reads | `ALT_reads<3` |
+| `NCALLERS`=1 (no other caller confirms the DeepVariant call) **and** a QC flag (`lowDP`, `lowGQ`, `AB_het`, `homopolymer`) | `unconfirmed+<flags>` |
+
+It runs **before** the recessive logic, so a low-quality call can neither complete a comp-het nor
+rescue a carrier. **Parents are never triaged**: dropping a parent's weak call would turn an inherited
+variant into a false de novo. The `NCALLERS` rule needs consensus tags, so it is off for single-caller
+inputs (DRAGEN, GATK). Consults (`-v`/`--lookup`) are not triaged.
+
+**Why these thresholds** (calibrated 2026-10-12, for a lab without orthogonal Sanger confirmation, where
+a "flag for confirmation" row can never be confirmed and is pure curation noise):
+- On GIAB HG002 (DeepVariant calls) the rule removes ~38% of false SNV calls genome-wide while losing
+  0.7% of true ones. Applied to four delivered batches it kept every confirmed or likely diagnosis
+  and removed every artifact P/LP row reviewed (low-AB LoF calls, homopolymer frameshifts, a male
+  het on chrX).
+- **DP < 10, not 15:** false-call share is 9-12% below DP 10 but 3.5% at 11-15, and a cut at 15
+  removed 30-85% of 3-caller-confirmed calls in 18-20x genomes.
+- **AB < 0.25:** false-call share is 18-31% below 0.25 vs 6% at 0.25-0.30. True mosaic variants are
+  lost too; at < 30x WGS they are not distinguishable from noise without confirmation.
+- **No GQ drop:** DeepVariant calls at GQ 10-19 are only 0.7-2.3% false, and GQ < 20 (gnomAD's
+  genotype cut, set for GATK) removed 11-24% of confirmed calls in 18-28x genomes. `lowGQ` stays a
+  flag.
+
+**Sample depth warning.** A proband whose median call depth is below `$SAMPLE_MIN_MEDIAN_DP` (15x)
+gets a `## WARNING ... low-coverage sample` provenance line: its negative results are weak.
+
+**DP fallback.** When `FORMAT/DP` is missing but `AD` is present (Strelka2 indels write `DPI`),
+`DP` is taken as the sum of `AD`, so no record silently skips the depth rules.
+
+**Legacy consensus records.** `consensus.sh` builds before 2026-10-12 (sarek-clinical) also emitted
+"rescued" records DeepVariant never called (`GT_SOURCE` = `strelka`/`haplotypecaller`). The rescue arm
+was removed there (on GIAB ~7 false calls per true one, nothing gained in the panel). Such records are
+skipped in every input (proband, parents, cohort tally), counted in the log, and the table carries a
+`## WARNING ... legacy consensus rescue arm` line. Rebuild the consensus and re-annotate to clean.
+
 ### Output columns (`<proband>.<panel>.candidatos`, TSV)
 
 Every table (per proband, batch, and `Lookup.*` consult) opens with `## ` provenance lines, then the
@@ -383,7 +429,7 @@ shell `grep -v '^##' f`.
 revel, eve_class, eve_score, cadd, am_class, am_score, pangolin_score,
 clinvar_sig, clinvar_stars, clinvar_disease, clinvar_aa, loftee,
 gnomAD_ac, gnomAD_an, gnomAD_af, gnomAD_nhomalt, gnomAD_filter,
-zygosity, GT, DP, GQ, AB, GT_SOURCE, NCALLERS, CONF,
+zygosity, GT, DP, GQ, AB, NCALLERS, CONF,
 inheritance, kept_by,
 acmg_class, acmg_points, acmg_criteria, flags, Association, MOI, GDV`
 
@@ -401,11 +447,10 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 - **`clinvar_stars`**: review-status stars (0–4) of the exact variant's ClinVar classification.
 - **`clinvar_aa`**: the PS1/PM5 amino-acid evidence string (see below), e.g.
   `PS1:BRCA1 p.R1699W (3*)` or `PM5:… [P/LP at residue: …] |conflicting`; empty if none.
-- **`GT_SOURCE` / `NCALLERS` / `CONF`**: consensus provenance, populated only when the input
-  came from `consensus.sh` (the Sarek union consensus); empty for single-source (e.g. DRAGEN) VCFs.
-  `GT_SOURCE` names the caller the genotype was taken from (`deepvariant`, `strelka`,
-  `haplotypecaller`); a non-DeepVariant value also means **no `VAF`** (allele balance is computed
-  from `AD`) and raises a `GT_rescued` QC flag.
+- **`NCALLERS` / `CONF`**: the consensus votes, populated only when the input came from
+  sarek-clinical `consensus.sh` (DeepVariant calls; the other callers vote); empty for single-source
+  (e.g. DRAGEN) VCFs. `NCALLERS`=1 means no other caller confirmed the call, which feeds the
+  low-quality triage (Stage 4). The former `GT_SOURCE` column was removed with the rescue arm.
 
 ### Automated ACMG/AMP classification & QC flags
 
@@ -490,7 +535,6 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   `homopolymer` (indel in **or adjacent to** a ≥5 bp
   homopolymer: the reference is scanned ±12 bp around the position, so a nearby run also flags,
   error-prone),
-  `GT_rescued` (genotype borrowed from a non-DeepVariant caller via `consensus.sh`; no VAF),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `gnomAD_uncovered` (intronic, beyond the gnomAD footprint, frequency never checked), `cohort_artifact` (recurrent
   gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts`: otherwise dropped),
   `clinvar_conflict` (see below).
@@ -725,7 +769,7 @@ This repo starts from an **annotated** VCF. To produce the calls in the first pl
 companion repo **[sarek-clinical](https://github.com/edoper/sarek-clinical)** (four-caller
 consensus germline calling on Google Cloud). It hands `<sample>.consensus.vcf.gz` straight to
 `vep_annotate.sh` here. Single-source VCFs (e.g. DRAGEN) work equally well: the filter picks up
-the consensus `GT_SOURCE`/`NCALLERS`/`CONF` tags when present and ignores them otherwise.
+the consensus `NCALLERS`/`CONF` votes when present and ignores them otherwise.
 
 Name inputs `<FAMILY>-P/-M/-F` (proband/mother/father): the filename drives trio/duo
 auto-discovery. Plainly-named singletons also work (each is analysed as its own proband).
@@ -954,6 +998,18 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
     a known pathogenic founder allele that survives the Stage-1 ClinVar exemption can auto-classify as
     Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
 - This is a **triage tool to feed manual curation**, not an automated classifier.
+
+## Changelog: 2026-10-12 (low-quality triage, rescue arm retired)
+
+| Change | Before |
+|---|---|
+| **Low-quality triage → `.lowqual` side file** (Stage 4: DP<10, het AB<0.25, <3 ALT reads, unconfirmed DeepVariant call + QC flag), before the recessive logic | Every call reached the main table; low-quality calls were only flagged, and a flagged call could complete a comp-het |
+| **Median-depth WARNING** (< 15x) in the provenance header | A 10x genome looked like any other |
+| **DP fallback from AD** when `FORMAT/DP` is missing | Strelka2-donated indels had no DP, so `lowDP` never fired on them |
+| **Legacy rescued records skipped** (`GT_SOURCE` ≠ deepvariant), with a WARNING; `GT_SOURCE` column and `GT_rescued` flag removed | Rescued records were triaged like DeepVariant calls (they were ~43% of a WGS candidate table) |
+
+**Re-run needed:** filtering only for any open case. Batches whose consensus predates 2026-10-12 also
+need the consensus rebuilt (sarek-clinical) and re-annotation for a WARNING-free table.
 
 ## Changelog: 2026-10-06 (resource currency + provenance)
 

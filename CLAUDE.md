@@ -133,6 +133,16 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   Self-test: `perl filtering_r.pl --selftest-cohort`.
   **The filter only sees samples in ONE run**: a batch split across per-sample directories has a
   cohort of 1. Put the whole batch's VCFs in one `$WORKDIR`.
+- **Low-quality triage → `<proband>.<panel>.lowqual` (2026-10-12).** A proband call with DP < 10,
+  het AB < 0.25, < 3 ALT reads, or `NCALLERS`=1 plus a QC flag (`lowDP`/`lowGQ`/`AB_het`/`homopolymer`)
+  is moved to the side file (leading `lowqual_reason` column; also `batch.<panel>.lowqual`), **before**
+  the recessive logic so it cannot complete a comp-het. **Parents are never triaged** (a dropped
+  parental call fakes a de novo). No GQ drop (DeepVariant GQ 10-19 is mostly true). Calibrated for a
+  lab WITHOUT Sanger confirmation: on GIAB it removes ~38% of false SNVs for 0.7% of true ones, and
+  kept every confirmed diagnosis in four batches. A proband with median call depth < 15x gets a
+  `## WARNING` line. Missing `FORMAT/DP` falls back to sum(AD). Legacy consensus records with
+  `GT_SOURCE` ≠ deepvariant (the retired sarek rescue arm) are skipped everywhere with a WARNING.
+  Constants `$TRIAGE_MIN_*` / `$SAMPLE_MIN_MEDIAN_DP`; tested in test section 13.
 - **One MANE row per variant:** a variant hitting >1 MANE transcript (MANE Select + MANE Plus Clinical,
   or overlapping gene models: e.g. MUTYH) is collapsed to a single row (prefer panel-primary → MANE
   Select → most evidence arms). `--lookup` still reports every annotation.
@@ -145,7 +155,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
 - **One `flags` column.** The recessive verdict and the QC/artifact flags are a single
   `;`-separated `flags` column (recessive verdict first), not the former `recessive_flag` + `qc_flag`
   pair. Values: `HOM` / `HEM` / `CompHet(trans)` / `CompHet?` / `carrier-only`, then `lowDP`, `lowGQ`,
-  `AB_het`, `AB_hom`, `homopolymer`, `GT_rescued`, `inh_lowqual`, `DN_unconfirmed`,
+  `AB_het`, `AB_hom`, `homopolymer`, `inh_lowqual`, `DN_unconfirmed`,
   `cohort_artifact`, `clinvar_conflict`, `gnomAD_uncovered` (intronic row beyond the gnomAD
   footprint with no record: its frequency was never checked).
 - **The recessive verdict is decided per gene but written per row.** The gene-level verdict governs
@@ -288,5 +298,6 @@ anywhere in this pipeline.
 - **Filtering:** system Perl only (no modules). PS1/PM5 additionally read
   `clinvar.MANE_missense.{PLP,BLB}.tsv` from `$CLINVAR_AA_DIR` (**unset by default**: set it in
   `site.env`); if absent, filtering still runs and PS1/PM5 are skipped with a warning.
-- **Input compatibility:** reads both single-source VCFs (e.g. DRAGEN) and the Sarek
-  union-consensus output of `consensus.sh` (picks up `GT_SOURCE`/`NCALLERS`/`CONF` tags when present).
+- **Input compatibility:** reads both single-source VCFs (e.g. DRAGEN) and the sarek-clinical
+  `consensus.sh` output (DeepVariant calls + `NCALLERS`/`CONF` votes, used when present). Pre-2026-10-12
+  consensus files also hold rescued records (`GT_SOURCE` ≠ deepvariant): skipped with a WARNING.
