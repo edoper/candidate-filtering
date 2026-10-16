@@ -89,11 +89,10 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #  * QC / artifact flags (in the consolidated `flags` column, after the recessive
 #    verdict): lowDP, lowGQ, AB_het/AB_hom, homopolymer, clinvar_conflict,
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
-#  * Low-quality triage [#12]: a proband call with DP < 10, het AB < 0.25, < 3
-#    ALT reads, or an unconfirmed DeepVariant call (NCALLERS=1) carrying a QC flag
-#    is moved out of the main table into <proband>.<panel>.lowqual (with the reason),
-#    never deleted. Parents keep every call (a dropped parental call would turn an
-#    inherited variant into a false de novo). A proband whose median depth is
+#  * Quality gate [#12]: a proband call with DP < 10, het AB < 0.25, < 3 ALT
+#    reads, or an unconfirmed DeepVariant call (NCALLERS=1) carrying a QC flag does
+#    not qualify and is excluded (no side table). Parents keep every call (a
+#    dropped parental call would turn an inherited variant into a false de novo). A proband whose median depth is
 #    < 15x gets a WARNING line: its negatives are weak.
 #    NOTE: parent VCFs are variant-only, so de-novo cannot be confirmed from
 #    parental reference depth: DN is flagged DN_unconfirmed by design.      [#6]
@@ -263,9 +262,10 @@ my $SF_REVEL    = 0.773;   # REVEL (ClinGen PP3_moderate)
 my $QC_MIN_DP   = 15;      # depth below this -> lowDP
 my $QC_MIN_GQ   = 20;      # genotype quality below this -> lowGQ
 
-# ── Low-quality triage [#12]: proband calls moved to <proband>.<panel>.lowqual ──
+# ── Quality gate [#12]: proband calls that fail it do not qualify (excluded) ──
 # Calibrated 2026-10-12 without access to orthogonal (Sanger) confirmation, so a
-# "flag for confirmation" row is pure curation noise. Evidence: GIAB HG002 (sarek
+# "flag for confirmation" row is pure curation noise, and a failing call simply does
+# not qualify (no .lowqual side table since 2026-10-16). Evidence: GIAB HG002 (sarek
 # consensus, vcfeval) + every delivered batch. The rule removes ~38% of DeepVariant's
 # false SNV calls genome-wide while losing 0.7% of true ones, kept every confirmed or
 # likely diagnosis in four batches, and removed every artifact P/LP row reviewed.
@@ -279,9 +279,9 @@ my $QC_MIN_GQ   = 20;      # genotype quality below this -> lowGQ
 #     more often false (15.5% vs 0.12% for SNVs); a clean unconfirmed call stays.
 # No GQ drop: DeepVariant GQ 10-19 calls are 0.7-2.3% false, and GQ < 20 removed
 # 11-24% of 3-caller-confirmed calls in 18-28x genomes. lowGQ stays a flag.
-my $TRIAGE_MIN_DP     = 10;    # proband DP below this -> .lowqual
-my $TRIAGE_MIN_AB_HET = 0.25;  # heterozygous ALT fraction below this -> .lowqual
-my $TRIAGE_MIN_ALT    = 3;     # ALT-supporting reads below this -> .lowqual
+my $GATE_MIN_DP     = 10;     # proband DP below this -> excluded
+my $GATE_MIN_AB_HET = 0.25;   # heterozygous ALT fraction below this -> excluded
+my $GATE_MIN_ALT    = 3;      # ALT-supporting reads below this -> excluded
 my $SAMPLE_MIN_MEDIAN_DP = 15; # proband median call depth below this -> WARNING line
 my $REF_FASTA   = $ENV{REF_FASTA} // $ENV{PANGOLIN_FASTA} // '';  # set by site.sh; blank => check skipped
 my $HAVE_REF    = -e "$REF_FASTA.fai";   # samtools-indexed reference for homopolymer check
@@ -1603,7 +1603,6 @@ my $cohort_built = 0;
 # Written once, after the loop, as batch.<panel>.candidatos: one file to open when the
 # question is "what did this batch turn up" rather than "what did this patient turn up".
 my @batch_rows;
-my @batch_lowq;                       # same, for batch.<panel>.lowqual [#12]
 my (@batch_prov, %batch_prov_seen);   # provenance header for batch.<panel>.candidatos
 
 #############################################################################
@@ -2192,22 +2191,19 @@ foreach my $proband (@probands) {
             # recessive reading is still surfaced via the per-gene comp-het flag below.
             my $rec_ar = ($class eq "primary" && moi_recessive($moi) && !moi_dominant($moi)) ? 1 : 0;
 
-            # ── [#12] Low-quality triage: decided per variant from the proband call ──
-            my @lowq;
+            # ── [#12] Quality gate: decided per variant from the proband call ──
+            my $gate_fail = 0;
             unless ($LOOKUP) {
-                push @lowq, "DP<$TRIAGE_MIN_DP"         if $dp =~ /^\d+$/ && $dp < $TRIAGE_MIN_DP;
-                push @lowq, "AB<$TRIAGE_MIN_AB_HET"     if $zyg eq "het" && $ab ne "" && $ab < $TRIAGE_MIN_AB_HET;
-                push @lowq, "ALT_reads<$TRIAGE_MIN_ALT" if $ada =~ /^\d+$/ && $ada < $TRIAGE_MIN_ALT;
-                if ($ncallers eq "1") {
-                    my @why = grep { /^(lowDP|lowGQ|AB_het|homopolymer)$/ } @qc;
-                    push @lowq, "unconfirmed+" . join("+", @why) if @why;
-                }
+                $gate_fail = 1 if ($dp =~ /^\d+$/ && $dp < $GATE_MIN_DP)
+                               || ($zyg eq "het" && $ab ne "" && $ab < $GATE_MIN_AB_HET)
+                               || ($ada =~ /^\d+$/ && $ada < $GATE_MIN_ALT)
+                               || ($ncallers eq "1" && grep { /^(lowDP|lowGQ|AB_het|homopolymer)$/ } @qc);
             }
 
             push @rows, {
                 vid=>$my_id, gene=>$gene, zyg=>$zyg, mat=>$in_m, pat=>$in_f,
                 class=>$class, sf_ar=>$sf_ar, rec_ar=>$rec_ar, qc=>$qc_flag, probe=>$probe,
-                lowq=>join(",", @lowq),
+                gate_fail=>$gate_fail,
                 transcript=>$transcript, mane_select=>(field(\@r,$i{mane_select}) ne "" ? 1 : 0),
                 data=>{
                     # END spans the REF allele (start + len(REF) - 1), so an indel reports
@@ -2287,12 +2283,11 @@ foreach my $proband (@probands) {
                 map { $_->{row} } values %best;
     }
 
-    # ── [#12] Move low-quality proband calls out of the table BEFORE the recessive
+    # ── [#12] Drop proband calls that fail the quality gate BEFORE the recessive
     #    logic, so an unreviewable call can neither complete a comp-het nor rescue a
-    #    carrier. Their QC flags are written as-is (no recessive verdict). ──
-    my @lowq_rows = grep {  $_->{lowq} } @rows;
-    @rows         = grep { !$_->{lowq} } @rows;
-    $_->{data}{flags} = $_->{qc} for @lowq_rows;
+    #    carrier. They do not qualify and are written nowhere. ──
+    my $n_gate_fail = grep {  $_->{gate_fail} } @rows;
+    @rows           = grep { !$_->{gate_fail} } @rows;
     my $dp_n = 0; $dp_n += $_ for values %dp_hist;
     my $median_dp;
     if ($dp_n) {
@@ -2452,19 +2447,6 @@ foreach my $proband (@probands) {
         }
         close OUT;
 
-        # ── [#12] Low-quality side table: same columns + the triage reason ──
-        open my $lq, ">", "$proband.$PANEL_TAG.lowqual" or die "lowqual: $!";
-        print $lq "$_\n" for @prov;
-        print $lq "## rows moved out of $proband.$PANEL_TAG.candidatos by the low-quality triage "
-                . "(DP<$TRIAGE_MIN_DP, het AB<$TRIAGE_MIN_AB_HET, ALT reads<$TRIAGE_MIN_ALT, or an unconfirmed "
-                . "DeepVariant call with a QC flag); not curated by default\n";
-        print $lq join("\t", "lowqual_reason", @COLS), "\n";
-        for my $row (@lowq_rows) {
-            my $line = join("\t", $row->{lowq}, map { $row->{data}{$_} // "" } @COLS);
-            print $lq "$line\n";
-            push @batch_lowq, "$proband\t$line";
-        }
-        close $lq;
 
         # ── [#9] Run summary ──
         my ($n_prim,$n_inc) = (0,0);
@@ -2482,7 +2464,7 @@ foreach my $proband (@probands) {
         # count would tally a variant on two MANE transcripts twice.
         printf "  variants: %d read | %d multiallelic-skipped | %d proband non-carrier (0/0, no-call) skipped | %d structural-pass | %d primary + %d incidental\n",
                $stat{lines}, $stat{multiallelic}, $stat{noncarrier}, scalar(keys %emit), $n_prim, $n_inc;
-        printf "  low-quality triage: %d row(s) -> %s.%s.lowqual\n", scalar(@lowq_rows), $proband, $PANEL_TAG;
+        printf "  quality gate: %d proband call(s) excluded\n", $n_gate_fail;
         printf "  legacy consensus: %d rescued (non-DeepVariant) record(s) skipped\n", $stat{legacy_rescued}
             if $stat{legacy_rescued};
         printf "  median proband call depth: %sx%s\n", $median_dp // "NA",
@@ -2511,13 +2493,6 @@ if (!$LOOKUP && @batch_rows) {
     close $bfh;
     printf "\n-> %s (%d candidate rows across %d proband(s))\n",
            $bf, scalar(@batch_rows), scalar(@probands);
-    my $lf = "batch.$PANEL_TAG.lowqual";
-    open my $lfh, ">", $lf or die "$lf: $!";
-    print $lfh "$_\n" for @batch_prov;
-    print $lfh join("\t", "sample", "lowqual_reason", @COLS), "\n";
-    print $lfh "$_\n" for @batch_lowq;
-    close $lfh;
-    printf "-> %s (%d low-quality rows)\n", $lf, scalar(@batch_lowq);
 }
 
 # ── Variant-mode cleanup: drop the annotated lookup VCF, splice scratch + tmp dir ──

@@ -361,25 +361,24 @@ per-proband total).
 A per-proband **run summary** prints counts (read / multiallelic-skipped / structural-pass
 / candidates / cohort-artifacts dropped) and breakdowns by `kept_by` and inheritance.
 
-### Stage 4: Low-quality triage (`<proband>.<panel>.lowqual`)
+### Stage 4: Quality gate
 
-A proband call that cannot be reviewed is moved out of the main table into
-**`<proband>.<panel>.lowqual`** (and `batch.<panel>.lowqual`): same columns, plus a leading
-`lowqual_reason`. Nothing is deleted; curators open the side file only when they choose to (for example
-when the phenotype points at one gene). The rule (constants `$TRIAGE_MIN_DP`, `$TRIAGE_MIN_AB_HET`,
-`$TRIAGE_MIN_ALT` at the top of `filtering_r.pl`):
+A proband call that cannot be reviewed **does not qualify** and is excluded, like a call that fails
+any other gate. There is no side table (the `.lowqual` file of 2026-10-12 was removed on 2026-10-16);
+the run log prints only the number of excluded calls. The rule (constants `$GATE_MIN_DP`,
+`$GATE_MIN_AB_HET`, `$GATE_MIN_ALT` at the top of `filtering_r.pl`):
 
-| Moved to `.lowqual` if | Reason string |
-|---|---|
-| proband `DP` < 10 | `DP<10` |
-| heterozygous ALT fraction < 0.25 | `AB<0.25` |
-| fewer than 3 ALT-supporting reads | `ALT_reads<3` |
-| `NCALLERS`=1 (no other caller confirms the DeepVariant call) **and** a QC flag (`lowDP`, `lowGQ`, `AB_het`, `homopolymer`) | `unconfirmed+<flags>` |
+| Excluded if |
+|---|
+| proband `DP` < 10 |
+| heterozygous ALT fraction < 0.25 |
+| fewer than 3 ALT-supporting reads |
+| `NCALLERS`=1 (no other caller confirms the DeepVariant call) **and** a QC flag (`lowDP`, `lowGQ`, `AB_het`, `homopolymer`) |
 
 It runs **before** the recessive logic, so a low-quality call can neither complete a comp-het nor
-rescue a carrier. **Parents are never triaged**: dropping a parent's weak call would turn an inherited
+rescue a carrier. **Parents are never gated**: dropping a parent's weak call would turn an inherited
 variant into a false de novo. The `NCALLERS` rule needs consensus tags, so it is off for single-caller
-inputs (DRAGEN, GATK). Consults (`-v`/`--lookup`) are not triaged.
+inputs (DRAGEN, GATK). Consults (`-v`/`--lookup`) are not gated.
 
 **Why these thresholds** (calibrated 2026-10-12, for a lab without orthogonal Sanger confirmation, where
 a "flag for confirmation" row can never be confirmed and is pure curation noise):
@@ -450,7 +449,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 - **`NCALLERS` / `CONF`**: the consensus votes, populated only when the input came from
   sarek-clinical `consensus.sh` (DeepVariant calls; the other callers vote); empty for single-source
   (e.g. DRAGEN) VCFs. `NCALLERS`=1 means no other caller confirmed the call, which feeds the
-  low-quality triage (Stage 4). The former `GT_SOURCE` column was removed with the rescue arm.
+  quality gate (Stage 4). The former `GT_SOURCE` column was removed with the rescue arm.
 
 ### Automated ACMG/AMP classification & QC flags
 
@@ -999,6 +998,14 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
     Benign. `BA1` also fires at exactly 5% (ACMG specifies *>* 5%).
 - This is a **triage tool to feed manual curation**, not an automated classifier.
 
+## Changelog: 2026-10-16 (no side table)
+
+| Change | Before |
+|---|---|
+| **Quality gate excludes** proband calls failing DP<10, het AB<0.25, <3 ALT reads or unconfirmed + QC flag; no file is written for them, only a count in the run log | They went to `<proband>.<panel>.lowqual` and `batch.<panel>.lowqual` |
+
+**Re-run needed:** none for the main tables (identical); old `.lowqual` files can be deleted.
+
 ## Changelog: 2026-10-12 (low-quality triage, rescue arm retired)
 
 | Change | Before |
@@ -1007,6 +1014,9 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
 | **Median-depth WARNING** (< 15x) in the provenance header | A 10x genome looked like any other |
 | **DP fallback from AD** when `FORMAT/DP` is missing | Strelka2-donated indels had no DP, so `lowDP` never fired on them |
 | **Legacy rescued records skipped** (`GT_SOURCE` ≠ deepvariant), with a WARNING; `GT_SOURCE` column and `GT_rescued` flag removed | Rescued records were triaged like DeepVariant calls (they were ~43% of a WGS candidate table) |
+
+**Superseded 2026-10-16:** the `.lowqual` side file was removed; the same rule now simply excludes
+the call (Stage 4).
 
 **Re-run needed:** filtering only for any open case. Batches whose consensus predates 2026-10-12 also
 need the consensus rebuilt (sarek-clinical) and re-annotation for a WARNING-free table.

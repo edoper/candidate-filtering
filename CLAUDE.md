@@ -133,16 +133,16 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   Self-test: `perl filtering_r.pl --selftest-cohort`.
   **The filter only sees samples in ONE run**: a batch split across per-sample directories has a
   cohort of 1. Put the whole batch's VCFs in one `$WORKDIR`.
-- **Low-quality triage → `<proband>.<panel>.lowqual` (2026-10-12).** A proband call with DP < 10,
+- **Quality gate (2026-10-12; no side table since 2026-10-16).** A proband call with DP < 10,
   het AB < 0.25, < 3 ALT reads, or `NCALLERS`=1 plus a QC flag (`lowDP`/`lowGQ`/`AB_het`/`homopolymer`)
-  is moved to the side file (leading `lowqual_reason` column; also `batch.<panel>.lowqual`), **before**
-  the recessive logic so it cannot complete a comp-het. **Parents are never triaged** (a dropped
+  does not qualify and is excluded (only a count in the run log; no `.lowqual` file), **before**
+  the recessive logic so it cannot complete a comp-het. **Parents are never gated** (a dropped
   parental call fakes a de novo). No GQ drop (DeepVariant GQ 10-19 is mostly true). Calibrated for a
   lab WITHOUT Sanger confirmation: on GIAB it removes ~38% of false SNVs for 0.7% of true ones, and
   kept every confirmed diagnosis in four batches. A proband with median call depth < 15x gets a
   `## WARNING` line. Missing `FORMAT/DP` falls back to sum(AD). Legacy consensus records with
   `GT_SOURCE` ≠ deepvariant (the retired sarek rescue arm) are skipped everywhere with a WARNING.
-  Constants `$TRIAGE_MIN_*` / `$SAMPLE_MIN_MEDIAN_DP`; tested in test section 13.
+  Constants `$GATE_MIN_*` / `$SAMPLE_MIN_MEDIAN_DP`; tested in test section 13.
 - **One MANE row per variant:** a variant hitting >1 MANE transcript (MANE Select + MANE Plus Clinical,
   or overlapping gene models: e.g. MUTYH) is collapsed to a single row (prefer panel-primary → MANE
   Select → most evidence arms). `--lookup` still reports every annotation.

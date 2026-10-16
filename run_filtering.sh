@@ -10,9 +10,8 @@
 #  Pass 2:   filtering_r.pl produces <proband>.<panel>.candidatos using the
 #            scores (pangolin_score column + splice rescue: >= 0.2 whitelisted
 #            splice consequences, >= 0.5 probes/others; PP3_Supporting >= 0.2).
-#  Cleanup:  all Pangolin scratch is deleted; only <proband>.<panel>.candidatos,
-#            the low-quality side table <proband>.<panel>.lowqual (+ batch.*), and
-#            the annotated VCFs (*.germline.vep.vcf.gz + .tbi + _summary.html)
+#  Cleanup:  all Pangolin scratch is deleted; only <proband>.<panel>.candidatos
+#            (+ batch.*) and the annotated VCFs (*.germline.vep.vcf.gz + .tbi + _summary.html)
 #            survive. Pangolin is therefore recomputed every run (cheap: only
 #            the few hundred structural-pass candidates).
 # ──────────────────────────────────────────────────────────────────────────
