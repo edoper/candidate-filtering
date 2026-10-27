@@ -26,7 +26,13 @@
 #   13. quality gate (2026-10-12/16)  : DP/AB/ALT-read/unconfirmed rules exclude the call (no
 #                                       .lowqual file), DP fallback from AD, legacy rescue
 #                                       records skipped, parents never gated, depth WARNING
+#   14. gnomAD reliability + ClinVar  : PM2 withheld on a gnomAD-filtered or low-AN site
+#       benign (2026-10-27)             (flag gnomAD_unreliable); ClinVar B/LB >=2 stars
+#                                       drops the row, 1-star B/LB stays with BP6
 set -uo pipefail
+# Fixtures model gnomAD at a synthetic scale (AN 1e5-2e5), below the real v4.1
+# joint floor of PM2_MIN_AN=800000; section 14 re-runs with the real default.
+export PM2_MIN_AN=50000
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 cd "$REPO"
@@ -937,6 +943,61 @@ fi
 WRAW=$(ls "$WD13"/W13-P.*.candidatos 2>/dev/null | head -1)
 grep -q '^## WARNING W13-P median call depth is 12x' "${WRAW:-/dev/null}" \
     && ok "median depth 12x -> low-coverage WARNING line" || bad "no low-coverage WARNING for a 12x sample"
+
+echo "== 14. gnomAD reliability gate on PM2, ClinVar benign >=2 stars =="
+GD14="$(mktemp -d)"
+trap 'rm -rf "$TD" "$XD" "$SD" "$PD" "$TRD" "$ED" "$DD" "$AAD" "$UD" "$LD" "$WD13" "$GD14"' EXIT
+for f in filtering_r.pl parse_pangolin.pl g4e.txt typevar.txt \
+         mane-plus-clinical-names.txt acmg_sf_v3.3.txt gnomad-mis-constraint.txt; do
+    ln -sf "$REPO/$f" "$GD14/$f"
+done
+# stop_gained in the dominant panel gene: <hgvsc> <ac> <an> <gnomad_filter> [clnsig] [clnrevstat]
+csq14() { printf '%s|1|%s|%s|stop_gained|%s|p.Gly34Ter|100|G/*|34||||40||||||%s|%s|0|0|%s|%s|%s|' \
+                 "$PANEL_GENE" "$MANE_TX" "$MANE_TX" "$1" "$2" "$3" "$4" "${5:-}" "${6:-}"; }
+STAR2='criteria_provided&_multiple_submitters&_no_conflicts'   # VEP writes '&' for ',' inside CSQ
+{ vhead G14-P
+  # 1000: well-covered PASS singleton -> PM2_Supporting as before
+  printf 'chr2\t1000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.100G>A' 1 1600000 PASS)"
+  # 2000: singleton at a site gnomAD QC-filtered (real case: PRODH p.Trp185Ter) -> no PM2
+  printf 'chr2\t2000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.200G>A' 1 1600000 EXOMES_FILTERED)"
+  # 3000: PASS but AN 26990, far below the 800000 floor -> no PM2
+  printf 'chr2\t3000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.300G>A' 1 26990 PASS)"
+  # 4000: no gnomAD record at all -> genuinely absent, PM2 kept
+  printf 'chr2\t4000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.400G>A' 0 0 '')"
+  # 5000: ClinVar Benign/Likely_benign at 2 stars -> row dropped
+  printf 'chr2\t5000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.500G>A' 1 1600000 PASS Benign/Likely_benign "$STAR2")"
+  # 6000: ClinVar Likely_benign at 1 star -> kept, BP6 only
+  printf 'chr2\t6000\t.\tG\tA\t500\tPASS\tCSQ=%s\tGT:AD:DP:GQ\t0/1:20,20:40:99\n' "$(csq14 'c.600G>A' 1 1600000 PASS Likely_benign "$STAR1")"
+} | bgzip -c > "$GD14/G14-P.germline.vep.vcf.gz"
+( cd "$GD14" && env -u PM2_MIN_AN CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >g14pass1.log 2>&1 )
+GIN=$(ls "$GD14"/G14-P.*.pangolin_input.csv 2>/dev/null | head -1)
+if [ -n "$GIN" ]; then
+    : > "${GIN%.pangolin_input.csv}.pangolin.tsv"
+    ( cd "$GD14" && env -u PM2_MIN_AN CLINVAR_AA_DIR= REF_FASTA= perl filtering_r.pl >g14pass2.log 2>&1 )
+fi
+GOUT=$(body "$(ls "$GD14"/G14-P.*.candidatos 2>/dev/null | head -1)")
+if [ -z "$GOUT" ]; then
+    bad "section 14: no candidatos"; tail -10 "$GD14"/g14pass*.log 2>/dev/null | sed 's/^/      /'
+else
+    gcol() { awk -F'\t' -v n="$1" -v p="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $2==p{print $h[n]}' "$GOUT"; }
+    case ",$(gcol acmg_criteria 1000)," in *,PM2_Supporting,*) ok "well-covered PASS singleton keeps PM2_Supporting";;
+        *) bad "PM2 lost on a clean site (criteria=$(gcol acmg_criteria 1000))";; esac
+    case "$(gcol flags 1000)" in *gnomAD_unreliable*) bad "clean site flagged gnomAD_unreliable";; *) ok "clean site not flagged";; esac
+    for p in 2000 3000; do
+        case ",$(gcol acmg_criteria $p)," in *,PM2*) bad "PM2 awarded at an unreliable gnomAD site $p (criteria=$(gcol acmg_criteria $p))";;
+            *) ok "PM2 withheld at unreliable gnomAD site $p";; esac
+        case "$(gcol flags $p)" in *gnomAD_unreliable*) ok "site $p flagged gnomAD_unreliable";;
+            *) bad "site $p missing gnomAD_unreliable (flags=$(gcol flags $p))";; esac
+    done
+    case ",$(gcol acmg_criteria 4000)," in *,PM2_Supporting,*) ok "no gnomAD record: PM2_Supporting kept (absence is real)";;
+        *) bad "PM2 lost on a gnomAD-absent variant (criteria=$(gcol acmg_criteria 4000))";; esac
+    [ -z "$(awk -F'\t' 'NR>1 && $2==5000' "$GOUT")" ] && ok "ClinVar B/LB at 2 stars dropped" \
+        || bad "ClinVar B/LB 2-star row survived (class=$(gcol acmg_class 5000))"
+    grep -q 'clinvar_benign drop: chr2-5000-G-A' "$GD14"/g14pass*.log && ok "ClinVar benign drop logged" \
+        || bad "no clinvar_benign drop log line"
+    case ",$(gcol acmg_criteria 6000)," in *,BP6,*) ok "1-star ClinVar LB kept, scored BP6";;
+        *) bad "1-star ClinVar LB row missing or no BP6 (criteria=$(gcol acmg_criteria 6000))";; esac
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails TEST(S) FAILED"; exit 1; fi

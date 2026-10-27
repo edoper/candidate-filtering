@@ -88,6 +88,7 @@ run_naming_selftest() if grep { $_ eq '--selftest' } @ARGV;
 #    single-proband, and small runs. --keep-cohort-artifacts keeps+tags instead. [#11]
 #  * QC / artifact flags (in the consolidated `flags` column, after the recessive
 #    verdict): lowDP, lowGQ, AB_het/AB_hom, homopolymer, clinvar_conflict,
+#    gnomAD_unreliable (site gnomAD-filtered or AN < $PM2_MIN_AN: PM2 withheld),
 #    (indels, via samtools+reference), inh_lowqual, DN_unconfirmed.   [#6,#7]
 #  * Quality gate [#12]: a proband call with DP < 10, het AB < 0.25, < 3 ALT
 #    reads, or an unconfirmed DeepVariant call (NCALLERS=1) carrying a QC flag does
@@ -313,6 +314,19 @@ my $COMBINER = $ENV{ACMG_COMBINER} // 'points';   # 'points' | 'categorical'
 # below; override with env PM2_STRENGTH only if you understand that trade.
 my $PM2_STRENGTH = $ENV{PM2_STRENGTH}
                 // ($COMBINER eq 'points' ? 'supporting' : 'moderate');
+# PM2 needs a gnomAD site that was actually genotyped well. A record whose FILTER is
+# not PASS (EXOMES_/GENOMES_FILTERED: failed gnomAD QC, typically a paralog or
+# low-complexity region) or whose joint AN is far below the resource maximum
+# (v4.1 joint ~1.61M; p05 of PASS sites ~1.24M) cannot support "absent or
+# singleton": the allele is unobserved because gnomAD barely looked. Rows with no
+# gnomAD record at all are unaffected (absence there is the PM2 case).
+my $PM2_MIN_AN  = $ENV{PM2_MIN_AN} // 800000;   # ~50% of the v4.1 joint maximum
+# A non-conflicting ClinVar Benign/Likely_benign assertion at >=2 stars (multiple
+# submitters agree, or expert panel) removes the row from the candidate table: our
+# automated points must not outvote a concordant curated benign classification.
+# BP6 alone (-1) could not, e.g. PVS1(8)+PM2_Supporting(1)-BP6(1) = 8 = LP.
+# Lookup mode (-v) still reports such variants. Set CLINVAR_BENIGN_MIN_STARS=0 to disable.
+my $CLINVAR_BENIGN_MIN_STARS = $ENV{CLINVAR_BENIGN_MIN_STARS} // 2;
 my $BS1_FREQ    = 1.0;     # gnomAD AF (%) at/above -> BS1 (too common for rare disease)
 my $BA1_FREQ    = 5.0;     # gnomAD AF (%) at/above -> BA1 (benign standalone)
 my $BS2_NHOM    = 10;      # gnomAD homozygotes at/above -> BS2
@@ -803,6 +817,14 @@ sub clinvar_pathogenic {
     return 0 if $s =~ /benign/i;
     return ($s =~ /pathogenic/i) ? 1 : 0;
 }
+# gnomAD site present but not trustworthy for a rarity claim (see $PM2_MIN_AN).
+sub gnomad_unreliable {
+    my ($filt, $an) = @_;
+    return 0 unless defined $an && $an ne "" && $an ne "." && $an > 0;   # no record: absence is real
+    return 1 if defined $filt && $filt ne "" && $filt ne "." && $filt ne "PASS";
+    return 1 if $an < $PM2_MIN_AN;
+    return 0;
+}
 sub clinvar_benign {
     my ($s) = @_;
     return 0 unless defined $s && $s ne "";
@@ -1016,6 +1038,7 @@ sub acmg_classify {
     # and to whitelisted intronic rows beyond the footprint ($v{uncovered}, see
     # $GNOMAD_INTRON_PAD), so ordinary candidates inside the footprint are unaffected.
     my $ac_assertable = !(($v{probe} || $v{uncovered}) && ($v{an} // 0) <= 0);
+    $ac_assertable = 0 if gnomad_unreliable($v{gfilter}, $v{an});
     push @P, ($PM2_STRENGTH eq 'moderate' ? "PM2" : "PM2_Supporting")
         if $ac_assertable && $v{ac} ne "" && $v{ac} <= $PM2_AC_MAX;   # absent or singleton
     # PP5 requires >=1 review star, like the other ClinVar consumers in this file
@@ -1702,13 +1725,14 @@ foreach my $proband (@probands) {
     if ($final) { $mama = load_parent($mfile); $papa = load_parent($ffile); }
 
     # Run statistics [#9].
-    my %stat = (lines=>0, multiallelic=>0, noncarrier=>0, structural=>0, cohort_dropped=>0, probes=>0,
+    my %stat = (lines=>0, multiallelic=>0, noncarrier=>0, structural=>0, cohort_dropped=>0, probes=>0, clinvar_benign_dropped=>0,
                 legacy_rescued=>0);
     my %dp_hist;         # proband call depth histogram -> median depth WARNING [#12]
 
     my %emit;            # EMIT pass: unique candidate variants
     my %emit_probe;      # vid -> 1 for splice-discovery probes (counted once) [#5]
     my @rows;            # FINAL pass: buffered rows (for per-gene recessive logic)
+    my %clinvar_benign_seen;   # vid -> 1 once dropped/logged (ClinVar B/LB >= $CLINVAR_BENIGN_MIN_STARS stars)
     my %cohort_seen;     # [#11] vid -> 1 once dropped/logged (avoid double-counting)
 
     my $pfh = open_vcf($pfile);
@@ -2029,6 +2053,15 @@ foreach my $proband (@probands) {
                 }
             }
             next unless @kept || $LOOKUP;
+            if (!$LOOKUP && $CLINVAR_BENIGN_MIN_STARS > 0 && clinvar_benign($clnsig)
+                && clinvar_stars($clnstars) >= $CLINVAR_BENIGN_MIN_STARS) {
+                unless ($clinvar_benign_seen{$my_id}++) {
+                    $stat{clinvar_benign_dropped}++;
+                    printf "  clinvar_benign drop: %-28s %-10s %s (%d star)\n",
+                           $my_id, ($gene ne "" ? $gene : "."), $clnsig, clinvar_stars($clnstars);
+                }
+                next;
+            }
             my $kept_by = @kept ? join(";", @kept) : "none";
 
             # Lookup: always surface ACMG-SF context for a secondary-findings gene
@@ -2143,7 +2176,7 @@ foreach my $proband (@probands) {
                 consequence=>$consequence, loftee=>$loftee,
                 freq=>$freq, nhom=>$g_nhom, revel=>$revel, am_score=>$am_score,
                 eve_class=>$eve_class, cadd_num=>$cadd_num, clnsig=>$clnsig, pangolin=>$pangolin,
-                ac=>$g_ac, an=>$g_an, probe=>$probe, uncovered=>$uncov, inh=>$inheritance, gt_clean=>(!$gt_susp),
+                ac=>$g_ac, an=>$g_an, gfilter=>$g_filter, probe=>$probe, uncovered=>$uncov, inh=>$inheritance, gt_clean=>(!$gt_susp),
                 aa_crit=>$aa_crit, aa_conflict=>$aa_conflict, clnstar=>$clnstar_n,  # PS1/PM5, PP5/BP6 star-gate
                 mis_oe=>mis_oe_for($gene),                                    # PP2 (missense constraint)
                 pm1=>$pm1_strength,                                            # PM1 (PERv1 region)
@@ -2159,6 +2192,10 @@ foreach my $proband (@probands) {
             # disagreeing with PVS1/PM2 is routine, not a contradiction.
             push @qc, "clinvar_conflict"
                 if $acmg_class =~ /athogenic/ && $acmg_crit =~ /(?:^|,)(BP6|BS1|BS2|BA1)(?:,|$)/;
+
+            # gnomAD looked at this site badly (QC-filtered or low AN): PM2 was withheld,
+            # and the frequency columns understate the allele's true population count.
+            push @qc, "gnomAD_unreliable" if gnomad_unreliable($g_filter, $g_an);
 
             # Which PER earned PM1, so the curator can audit the call rather than
             # take "PM1_Strong" on trust.
@@ -2471,6 +2508,8 @@ foreach my $proband (@probands) {
                (defined $median_dp && $median_dp < $SAMPLE_MIN_MEDIAN_DP ? "  WARNING: low-coverage sample" : "");
         printf "  splice discovery: %d probe(s) scored, %d rescued by Pangolin >= %s\n",
                $stat{probes}, $n_probe_kept, $SPLICE_MIN if $SPLICE_PROBE && $stat{probes};
+        printf "  clinvar_benign: %d variant(s) dropped (ClinVar B/LB, >=%d stars, no P/LP or conflict)\n",
+               $stat{clinvar_benign_dropped}, $CLINVAR_BENIGN_MIN_STARS if $stat{clinvar_benign_dropped};
         printf "  cohort_artifact: %d variant(s) dropped (recurrent in >=%d%% of cohort & gnomAD-absent)\n",
                $stat{cohort_dropped}, int($COHORT_MAX_FRAC*100 + 0.5)
             if $cohort_on && !$KEEP_COHORT_ARTIFACTS && $stat{cohort_dropped};

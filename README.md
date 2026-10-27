@@ -467,7 +467,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   | **PS1** | A **different** variant producing the same amino-acid change is ClinVar P/LP (≥1★). The variant's own ClinVar record is excluded, so a variant that is itself P/LP does not earn PS1 from its own submission | ClinVar MANE-missense |
   | **PS2** | De novo in a **full trio** (`inheritance=DN`, clean proband genotype) **in a gene whose panel MOI is dominant-capable** (AD/XLD/XL/dual, de novo occurrence of a het supports nothing under pure-recessive inheritance; the duo path always had this gate, the trio path now matches it). Relatedness is assumed confirmed. Structurally unreachable without both parents, `inheritance` is only ever `DN` when both are present, a singleton gets `NA` and a duo gets `DN/IM`–`DN/IF` | parental GT + panel MOI |
   | **PM1** | **Missense / in-frame indel** inside a **PERv1** pathogenic-variant-enriched region naming the **same gene** (§0.6b). Two arms: **`PERv1_direct`** graded by its own fold enrichment (**≥ 18.7 → `PM1_Strong`**, else Moderate); **`PERv1_paralog`**, the family-wise arm, the paper's headline result, **capped at Moderate**, since transferring a family's evidence onto one member costs a tier. Direct outranks paralog on overlap. Unlike PP2 it is **not** suppressed by BP4: the regions were validated against de novo variants held out of their construction. The winning arm + region are echoed to `flags` for audit | PERv1 BED (Pérez-Palma 2020) |
-  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1). Strength **follows the combiner**: `PM2_Supporting` ([ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/)) under the points default, Moderate under `categorical`; see *Combining* below for why the pairing is load-bearing | gnomAD v4.1 |
+  | **PM2** | Absent or singleton in gnomAD (AC ≤ 1), **withheld where gnomAD's look was unreliable**: a record with FILTER ≠ PASS or joint AN < `$PM2_MIN_AN` = 800000 (~50% of the v4.1 maximum) is flagged `gnomAD_unreliable` instead (2026-10-27: PRODH p.Trp185Ter, an EXOMES_FILTERED paralog-region site with AN 26990, reached six tables as LP). Strength **follows the combiner**: `PM2_Supporting` ([ClinGen SVI 2020](https://clinicalgenome.org/working-groups/sequence-variant-interpretation/)) under the points default, Moderate under `categorical`; see *Combining* below for why the pairing is load-bearing | gnomAD v4.1 |
   | **PM4** | Protein length change (in-frame indel / `stop_lost`). **Not counted when any PVS1 tier fired**: VEP compound terms (`start_lost&inframe_deletion`, `frameshift_variant&stop_lost`) otherwise yielded two ACMG lines for one protein-terminus effect | consequence |
   | **PM5** | Different change, **or a single-codon in-frame deletion**, at a residue carrying a P/LP missense (≥1★) | ClinVar MANE-missense |
   | **PM6** | **Assumed** de novo: a trio `DN` whose genotype isn't clean. **Not awarded in a duo** (`DN/IF`–`DN/IM`): absence from the one tested parent is equally inheritance from the untested one, so PM6 fired on about half of every duo's rows. The **dominant-capable MOI gate applies**: a de novo call in a pure-AR gene, or under any panel with `MOI = NA`, e.g. a plain-symbol custom list, earns neither PS2 nor PM6 | parental GT + panel MOI |
@@ -536,7 +536,9 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   error-prone),
   `inh_lowqual` (carrying-parent genotype is weak), `DN_unconfirmed`, `gnomAD_uncovered` (intronic, beyond the gnomAD footprint, frequency never checked), `cohort_artifact` (recurrent
   gnomAD-absent cohort artifact, present only under `--keep-cohort-artifacts`: otherwise dropped),
-  `clinvar_conflict` (see below).
+  `clinvar_conflict` (see below), `gnomAD_unreliable` (the gnomAD record has FILTER ≠ PASS or
+  joint AN < `$PM2_MIN_AN` = 800000: the site was not reliably genotyped, so PM2 is withheld and the
+  frequency columns understate the true count).
 - **`clinvar_conflict`**: the auto-class reached Pathogenic/Likely pathogenic **while a hard benign
   line fired** (`BP6`/`BS1`/`BS2`/`BA1`). The points sum nets opposing evidence arithmetically (and
   the categorical `Conflicting` verdict needs both sides at a 2-tier threshold), so a single benign
@@ -544,7 +546,11 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
   variant ClinVar calls **Benign with review stars**, and a curator sorting by `acmg_class` sees a
   clean LP. This is a triage tool, so the class is left alone and the contradiction is made visible
   instead. `BP4` is deliberately excluded: a computational prediction disagreeing with PVS1/PM2 is
-  routine, not a contradiction.
+  routine, not a contradiction. **Exception (2026-10-27):** a non-conflicting ClinVar Benign/Likely_benign
+  at ≥ 2 review stars (`$CLINVAR_BENIGN_MIN_STARS`; multiple submitters agree, or expert panel) is a
+  stopper: the row is dropped and logged (`clinvar_benign drop:`), since automated points must not
+  outvote a concordant curated classification. 1-star B/LB still only scores BP6; `-v` lookup still
+  reports the variant; `CLINVAR_BENIGN_MIN_STARS=0` disables.
 - **De-novo confidence [#6]:** parent VCFs here are *variant-only* (no reference depth at non-variant
   sites), so de-novo cannot be confirmed from parental coverage: `DN` rows are flagged
   `DN_unconfirmed`. Inherited rows instead get `inh_lowqual` when the parental call is low quality.
