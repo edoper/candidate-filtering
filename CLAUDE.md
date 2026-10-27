@@ -140,7 +140,7 @@ perl filtering_r.pl -v 'chr17-7675088-C-T' -l my_genes.txt   # override the g4e 
   parental call fakes a de novo). No GQ drop (DeepVariant GQ 10-19 is mostly true). Calibrated for a
   lab WITHOUT Sanger confirmation: on GIAB it removes ~38% of false SNVs for 0.7% of true ones, and
   kept every confirmed diagnosis in four batches. A proband with median call depth < 15x gets a
-  `## WARNING` line. Missing `FORMAT/DP` falls back to sum(AD). Legacy consensus records with
+  `## WARNING` line. Missing `FORMAT/DP` falls back to sum(AD). Legacy rescued records with
   `GT_SOURCE` ≠ deepvariant (the retired sarek rescue arm) are skipped everywhere with a WARNING.
   Constants `$GATE_MIN_*` / `$SAMPLE_MIN_MEDIAN_DP`; tested in test section 13.
 - **One MANE row per variant:** a variant hitting >1 MANE transcript (MANE Select + MANE Plus Clinical,
@@ -305,4 +305,4 @@ anywhere in this pipeline.
   `site.env`); if absent, filtering still runs and PS1/PM5 are skipped with a warning.
 - **Input compatibility:** reads both single-source VCFs (e.g. DRAGEN) and the sarek-clinical
   `consensus.sh` output (DeepVariant calls + `NCALLERS`/`CONF` votes, used when present). Pre-2026-10-12
-  consensus files also hold rescued records (`GT_SOURCE` ≠ deepvariant): skipped with a WARNING.
+  builds also hold rescued records (`GT_SOURCE` ≠ deepvariant): skipped with a WARNING.

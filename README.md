@@ -7,8 +7,8 @@ inheritance and recessive context for **downstream manual curation**.
 
 ## What this pipeline does
 
-1. **Annotates** a patient germline VCF (from DRAGEN, GATK, or the `sarek-clinical` 4-caller
-   consensus): keeps FILTER=PASS calls, splits and left-aligns them, then runs Ensembl VEP 115
+1. **Annotates** a patient germline VCF (from DRAGEN, GATK, or the `sarek-clinical` voted VCF:
+   DeepVariant calls tagged with three other callers' votes): keeps FILTER=PASS calls, splits and left-aligns them, then runs Ensembl VEP 115
    with LOFTEE, REVEL, AlphaMissense, EVE and CADD, plus gnomAD v4.1 frequencies, ClinVar and the
    PERv1 regions. Each annotated VCF records which ClinVar and gnomAD releases it was joined to.
 2. **Filters** to rare variants on MANE transcripts in an epilepsy gene panel (Genes4Epilepsy,
@@ -377,7 +377,7 @@ the run log prints only the number of excluded calls. The rule (constants `$GATE
 
 It runs **before** the recessive logic, so a low-quality call can neither complete a comp-het nor
 rescue a carrier. **Parents are never gated**: dropping a parent's weak call would turn an inherited
-variant into a false de novo. The `NCALLERS` rule needs consensus tags, so it is off for single-caller
+variant into a false de novo. The `NCALLERS` rule needs caller-vote tags, so it is off for single-caller
 inputs (DRAGEN, GATK). Consults (`-v`/`--lookup`) are not gated.
 
 **Why these thresholds** (calibrated 2026-10-12, for a lab without orthogonal Sanger confirmation, where
@@ -400,11 +400,11 @@ gets a `## WARNING ... low-coverage sample` provenance line: its negative result
 **DP fallback.** When `FORMAT/DP` is missing but `AD` is present (Strelka2 indels write `DPI`),
 `DP` is taken as the sum of `AD`, so no record silently skips the depth rules.
 
-**Legacy consensus records.** `consensus.sh` builds before 2026-10-12 (sarek-clinical) also emitted
+**Legacy rescued records.** `consensus.sh` builds before 2026-10-12 (sarek-clinical) also emitted
 "rescued" records DeepVariant never called (`GT_SOURCE` = `strelka`/`haplotypecaller`). The rescue arm
 was removed there (on GIAB ~7 false calls per true one, nothing gained in the panel). Such records are
 skipped in every input (proband, parents, cohort tally), counted in the log, and the table carries a
-`## WARNING ... legacy consensus rescue arm` line. Rebuild the consensus and re-annotate to clean.
+`## WARNING ... legacy consensus rescue arm` line. Rebuild the voted VCF and re-annotate to clean.
 
 ### Output columns (`<proband>.<panel>.candidatos`, TSV)
 
@@ -446,7 +446,7 @@ prefix is stripped; non-coding/synonymous variants show only the `c.` part).
 - **`clinvar_stars`**: review-status stars (0–4) of the exact variant's ClinVar classification.
 - **`clinvar_aa`**: the PS1/PM5 amino-acid evidence string (see below), e.g.
   `PS1:BRCA1 p.R1699W (3*)` or `PM5:… [P/LP at residue: …] |conflicting`; empty if none.
-- **`NCALLERS` / `CONF`**: the consensus votes, populated only when the input came from
+- **`NCALLERS` / `CONF`**: the caller votes, populated only when the input came from
   sarek-clinical `consensus.sh` (DeepVariant calls; the other callers vote); empty for single-source
   (e.g. DRAGEN) VCFs. `NCALLERS`=1 means no other caller confirmed the call, which feeds the
   quality gate (Stage 4). The former `GT_SOURCE` column was removed with the rescue arm.
@@ -772,9 +772,9 @@ The same FASTA doubles as `REF_FASTA` for the homopolymer QC flag; if absent, th
 
 This repo starts from an **annotated** VCF. To produce the calls in the first place, see the
 companion repo **[sarek-clinical](https://github.com/edoper/sarek-clinical)** (four-caller
-consensus germline calling on Google Cloud). It hands `<sample>.consensus.vcf.gz` straight to
+germline calling (DeepVariant calls, three other callers vote) on Google Cloud). It hands `<sample>.consensus.vcf.gz` straight to
 `vep_annotate.sh` here. Single-source VCFs (e.g. DRAGEN) work equally well: the filter picks up
-the consensus `NCALLERS`/`CONF` votes when present and ignores them otherwise.
+the `NCALLERS`/`CONF` caller votes when present and ignores them otherwise.
 
 Name inputs `<FAMILY>-P/-M/-F` (proband/mother/father): the filename drives trio/duo
 auto-discovery. Plainly-named singletons also work (each is analysed as its own proband).
@@ -1024,8 +1024,8 @@ at the top of `filtering_r.pl` and are edited there directly. `--keep-ar-carrier
 **Superseded 2026-10-16:** the `.lowqual` side file was removed; the same rule now simply excludes
 the call (Stage 4).
 
-**Re-run needed:** filtering only for any open case. Batches whose consensus predates 2026-10-12 also
-need the consensus rebuilt (sarek-clinical) and re-annotation for a WARNING-free table.
+**Re-run needed:** filtering only for any open case. Batches whose `consensus.sh` output predates 2026-10-12 also
+need the voted VCFs rebuilt (sarek-clinical) and re-annotation for a WARNING-free table.
 
 ## Changelog: 2026-10-06 (resource currency + provenance)
 
